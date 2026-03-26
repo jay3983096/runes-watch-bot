@@ -4,6 +4,8 @@ import requests
 import redis
 import json
 from decimal import Decimal, ROUND_DOWN
+from datetime import datetime, timezone, timedelta
+from html import escape
 
 app = Flask(__name__)
 
@@ -13,6 +15,8 @@ TARGET_RUNE_NAME = os.getenv("TARGET_RUNE_NAME")
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 REDIS_URL = os.getenv("REDIS_URL")
+
+SGT = timezone(timedelta(hours=8))
 
 redis_client = None
 if REDIS_URL:
@@ -28,7 +32,10 @@ def get_headers():
 
 def format_number(value, decimals=8):
     try:
-        d = Decimal(str(value)).quantize(Decimal("1." + "0" * decimals), rounding=ROUND_DOWN)
+        d = Decimal(str(value)).quantize(
+            Decimal("1." + "0" * decimals),
+            rounding=ROUND_DOWN
+        )
         s = format(d, "f").rstrip("0").rstrip(".")
         return s if s else "0"
     except Exception:
@@ -42,6 +49,18 @@ def safe_raw_to_readable(amount_raw, divisibility):
         return raw / divisor
     except Exception:
         return Decimal("0")
+
+
+def format_ts(ts):
+    try:
+        dt = datetime.fromtimestamp(int(ts), tz=SGT)
+        return dt.strftime("%Y-%m-%d %H:%M")
+    except Exception:
+        return "未知时间"
+
+
+def tx_url(txid):
+    return f"https://mempool.space/tx/{txid}"
 
 
 def fetch_rune_events():
@@ -157,7 +176,7 @@ def get_address_netflow_data(address):
     }
 
 
-def send_telegram_message(text, chat_id=None):
+def send_telegram_message(text, chat_id=None, parse_mode=None):
     if not TELEGRAM_BOT_TOKEN:
         return {"success": False, "error": "TELEGRAM_BOT_TOKEN 缺失"}
 
@@ -168,8 +187,12 @@ def send_telegram_message(text, chat_id=None):
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     payload = {
         "chat_id": final_chat_id,
-        "text": text
+        "text": text,
+        "disable_web_page_preview": True
     }
+
+    if parse_mode:
+        payload["parse_mode"] = parse_mode
 
     response = requests.post(url, json=payload, timeout=20)
     data = response.json()
@@ -283,6 +306,15 @@ def format_user_config(config):
     )
 
 
+def format_watch_list(config):
+    watch_list = config.get("watch_addresses", [])
+    if not watch_list:
+        return "📭 当前没有监控地址。"
+
+    lines = [f"{i}. {addr}" for i, addr in enumerate(watch_list, start=1)]
+    return "📌 当前监控地址列表\n\n" + "\n".join(lines)
+
+
 def format_history(address, result, limit=5):
     netflows = result.get("netflows", [])[:limit]
     summary = result.get("summary", {})
@@ -304,17 +336,21 @@ def format_history(address, result, limit=5):
                 sign = ""
 
             net_amount = format_number(item.get("net_readable", "0"))
-            txid_short = item.get("txid", "")[:12] + "..."
+            time_text = format_ts(item.get("timestamp"))
+            txid = item.get("txid", "")
+            link = f'<a href="{escape(tx_url(txid))}">查看</a>'
+
             lines.append(
                 f"{i}. {direction_cn} {sign}{net_amount}\n"
-                f"   交易：{txid_short}"
+                f"   时间：{time_text}\n"
+                f"   {link}"
             )
         history_text = "\n".join(lines)
 
     return (
         "📜 地址历史记录\n\n"
-        f"地址：{address}\n"
-        f"符文：{TARGET_RUNE_NAME}\n\n"
+        f"地址：{escape(address)}\n"
+        f"符文：{escape(TARGET_RUNE_NAME)}\n\n"
         f"{history_text}\n\n"
         f"汇总：\n"
         f"总流入：{format_number(summary.get('total_inflow', '0'))}\n"
@@ -326,31 +362,45 @@ def format_history(address, result, limit=5):
 def handle_command(chat_id, text):
     config = load_user_config(chat_id)
     if config is None:
-        return "❌ Redis 未连接。"
+        return {
+            "text": "❌ Redis 未连接。",
+            "parse_mode": None
+        }
 
     parts = text.strip().split()
 
     if not parts:
-        return "❌ 空命令。"
+        return {
+            "text": "❌ 空命令。",
+            "parse_mode": None
+        }
 
     command = parts[0].lower()
 
     if command == "/start":
-        return (
-            "✅ Runes 监控机器人已就绪。\n\n"
-            "可用命令：\n"
-            "/start\n"
-            "/setrune <符文ID> <符文名称>\n"
-            "/addwatch <地址>\n"
-            "/myconfig\n"
-            "/balance <地址>\n"
-            "/summary <地址>\n"
-            "/history <地址>"
-        )
+        return {
+            "text": (
+                "✅ Runes 监控机器人已就绪。\n\n"
+                "可用命令：\n"
+                "/start\n"
+                "/setrune <符文ID> <符文名称>\n"
+                "/addwatch <地址>\n"
+                "/removewatch <地址>\n"
+                "/listwatch\n"
+                "/myconfig\n"
+                "/balance <地址>\n"
+                "/summary <地址>\n"
+                "/history <地址>"
+            ),
+            "parse_mode": None
+        }
 
     if command == "/setrune":
         if len(parts) < 3:
-            return "❌ 用法：/setrune <符文ID> <符文名称>"
+            return {
+                "text": "❌ 用法：/setrune <符文ID> <符文名称>",
+                "parse_mode": None
+            }
 
         rune_id = parts[1]
         rune_name = " ".join(parts[2:])
@@ -359,15 +409,21 @@ def handle_command(chat_id, text):
         config["rune_name"] = rune_name
         save_user_config(chat_id, config)
 
-        return (
-            "✅ 已设置监控符文\n\n"
-            f"符文 ID：{rune_id}\n"
-            f"符文名称：{rune_name}"
-        )
+        return {
+            "text": (
+                "✅ 已设置监控符文\n\n"
+                f"符文 ID：{rune_id}\n"
+                f"符文名称：{rune_name}"
+            ),
+            "parse_mode": None
+        }
 
     if command == "/addwatch":
         if len(parts) < 2:
-            return "❌ 用法：/addwatch <地址>"
+            return {
+                "text": "❌ 用法：/addwatch <地址>",
+                "parse_mode": None
+            }
 
         address = parts[1]
 
@@ -375,17 +431,60 @@ def handle_command(chat_id, text):
             config["watch_addresses"].append(address)
             save_user_config(chat_id, config)
 
-        return (
-            "✅ 已添加监控地址\n\n"
-            f"地址：{address}"
-        )
+        return {
+            "text": (
+                "✅ 已添加监控地址\n\n"
+                f"地址：{address}"
+            ),
+            "parse_mode": None
+        }
+
+    if command == "/removewatch":
+        if len(parts) < 2:
+            return {
+                "text": "❌ 用法：/removewatch <地址>",
+                "parse_mode": None
+            }
+
+        address = parts[1]
+
+        if address in config["watch_addresses"]:
+            config["watch_addresses"].remove(address)
+            save_user_config(chat_id, config)
+            return {
+                "text": (
+                    "✅ 已移除监控地址\n\n"
+                    f"地址：{address}"
+                ),
+                "parse_mode": None
+            }
+
+        return {
+            "text": (
+                "⚠️ 该地址不在监控列表中\n\n"
+                f"地址：{address}"
+            ),
+            "parse_mode": None
+        }
+
+    if command == "/listwatch":
+        return {
+            "text": format_watch_list(config),
+            "parse_mode": None
+        }
 
     if command == "/myconfig":
-        return format_user_config(config)
+        return {
+            "text": format_user_config(config),
+            "parse_mode": None
+        }
 
     if command == "/balance":
         if len(parts) < 2:
-            return "❌ 用法：/balance <地址>"
+            return {
+                "text": "❌ 用法：/balance <地址>",
+                "parse_mode": None
+            }
 
         address = parts[1]
 
@@ -393,62 +492,98 @@ def handle_command(chat_id, text):
             data = get_address_balance_data(address)
 
             if data.get("code") != 0:
-                return f"❌ 查询余额失败：{json.dumps(data, ensure_ascii=False)}"
+                return {
+                    "text": f"❌ 查询余额失败：{json.dumps(data, ensure_ascii=False)}",
+                    "parse_mode": None
+                }
 
             rune_data = data.get("data", {})
             amount_raw = rune_data.get("amount", "0")
             divisibility = int(rune_data.get("divisibility", 0))
             readable_amount = safe_raw_to_readable(amount_raw, divisibility)
 
-            return (
-                "💰 地址余额\n\n"
-                f"地址：{address}\n"
-                f"符文：{TARGET_RUNE_NAME}\n"
-                f"余额：{format_number(readable_amount)}"
-            )
+            return {
+                "text": (
+                    "💰 地址余额\n\n"
+                    f"地址：{address}\n"
+                    f"符文：{TARGET_RUNE_NAME}\n"
+                    f"余额：{format_number(readable_amount)}"
+                ),
+                "parse_mode": None
+            }
         except Exception as e:
-            return f"❌ 查询余额出错：{str(e)}"
+            return {
+                "text": f"❌ 查询余额出错：{str(e)}",
+                "parse_mode": None
+            }
 
     if command == "/summary":
         if len(parts) < 2:
-            return "❌ 用法：/summary <地址>"
+            return {
+                "text": "❌ 用法：/summary <地址>",
+                "parse_mode": None
+            }
 
         address = parts[1]
 
         try:
             result = get_address_netflow_data(address)
             if not result.get("success"):
-                return "❌ 查询汇总失败。"
+                return {
+                    "text": "❌ 查询汇总失败。",
+                    "parse_mode": None
+                }
 
             summary = result.get("summary", {})
 
-            return (
-                "📊 地址汇总\n\n"
-                f"地址：{address}\n"
-                f"符文：{TARGET_RUNE_NAME}\n"
-                f"总流入：{format_number(summary.get('total_inflow', '0'))}\n"
-                f"总流出：{format_number(summary.get('total_outflow', '0'))}\n"
-                f"净持仓：{format_number(summary.get('net_position', '0'))}"
-            )
+            return {
+                "text": (
+                    "📊 地址汇总\n\n"
+                    f"地址：{address}\n"
+                    f"符文：{TARGET_RUNE_NAME}\n"
+                    f"总流入：{format_number(summary.get('total_inflow', '0'))}\n"
+                    f"总流出：{format_number(summary.get('total_outflow', '0'))}\n"
+                    f"净持仓：{format_number(summary.get('net_position', '0'))}"
+                ),
+                "parse_mode": None
+            }
         except Exception as e:
-            return f"❌ 查询汇总出错：{str(e)}"
+            return {
+                "text": f"❌ 查询汇总出错：{str(e)}",
+                "parse_mode": None
+            }
 
     if command == "/history":
         if len(parts) < 2:
-            return "❌ 用法：/history <地址>"
+            return {
+                "text": "❌ 用法：/history <地址>",
+                "parse_mode": None
+            }
 
         address = parts[1]
 
         try:
             result = get_address_netflow_data(address)
             if not result.get("success"):
-                return "❌ 查询历史失败。"
+                return {
+                    "text": "❌ 查询历史失败。",
+                    "parse_mode": None
+                }
 
-            return format_history(address, result, limit=5)
+            return {
+                "text": format_history(address, result, limit=5),
+                "parse_mode": "HTML"
+            }
         except Exception as e:
-            return f"❌ 查询历史出错：{str(e)}"
+            return {
+                "text": f"❌ 查询历史出错：{str(e)}",
+                "parse_mode": None
+            }
 
-    return "❌ 未知命令，请先使用 /start 查看帮助。"
+    return {
+        "text": "❌ 未知命令，请先使用 /start 查看帮助。",
+        "parse_mode": None
+    }
 
 
 @app.route("/")
@@ -484,14 +619,18 @@ def poll_bot():
             chat_id = chat.get("id")
 
             if text and chat_id:
-                reply_text = handle_command(str(chat_id), text)
-                send_result = send_telegram_message(reply_text, chat_id=str(chat_id))
+                reply = handle_command(str(chat_id), text)
+                send_result = send_telegram_message(
+                    reply["text"],
+                    chat_id=str(chat_id),
+                    parse_mode=reply.get("parse_mode")
+                )
 
                 processed.append({
                     "update_id": update_id,
                     "chat_id": chat_id,
                     "text": text,
-                    "reply_text": reply_text,
+                    "reply_text": reply["text"],
                     "send_success": send_result.get("success", False)
                 })
 
@@ -568,27 +707,34 @@ def check_watches(chat_id):
 
         direction = latest.get("direction")
         net_amount = format_number(latest.get("net_readable", "0"))
+        time_text = format_ts(latest.get("timestamp"))
+        txid = latest.get("txid")
 
         if direction == "inflow":
             emoji = "🟢"
             direction_cn = "流入"
+            sign = "+"
         elif direction == "outflow":
             emoji = "🔴"
             direction_cn = "流出"
+            sign = "-"
         else:
             emoji = "⚪"
             direction_cn = "无变化"
+            sign = ""
 
         message = (
             f"{emoji} 地址活动提醒\n\n"
-            f"地址：{address}\n"
-            f"符文：{TARGET_RUNE_NAME}\n"
-            f"方向：{direction_cn}\n"
-            f"净变化：{net_amount}\n"
-            f"交易：{latest_txid}"
+            f"1. {direction_cn} {sign}{net_amount}\n"
+            f"   时间：{time_text}\n"
+            f'   <a href="{escape(tx_url(txid))}">查看</a>'
         )
 
-        send_result = send_telegram_message(message, chat_id=str(chat_id))
+        send_result = send_telegram_message(
+            message,
+            chat_id=str(chat_id),
+            parse_mode="HTML"
+        )
 
         if send_result.get("success"):
             save_last_pushed_tx(chat_id, address, latest_txid)
