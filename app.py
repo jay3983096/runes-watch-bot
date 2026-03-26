@@ -29,9 +29,6 @@ if REDIS_URL:
     redis_client = redis.from_url(REDIS_URL, decode_responses=True)
 
 
-# =========================
-# 基础工具
-# =========================
 def get_headers():
     return {
         "Authorization": f"Bearer {UNISAT_API_KEY}",
@@ -81,9 +78,6 @@ def tx_url(txid):
     return f"https://mempool.space/tx/{txid}"
 
 
-# =========================
-# Telegram 主菜单按钮
-# =========================
 def main_menu_keyboard():
     return {
         "keyboard": [
@@ -97,9 +91,6 @@ def main_menu_keyboard():
     }
 
 
-# =========================
-# Redis Key
-# =========================
 def get_user_key(chat_id):
     return f"user_config:{chat_id}"
 
@@ -112,9 +103,6 @@ def get_user_state_key(chat_id):
     return f"user_state:{chat_id}"
 
 
-# =========================
-# Redis 用户配置
-# =========================
 def load_user_config(chat_id):
     if not redis_client:
         return None
@@ -151,9 +139,6 @@ def list_all_user_chat_ids():
     return chat_ids
 
 
-# =========================
-# Redis 输入状态
-# =========================
 def load_user_state(chat_id):
     if not redis_client:
         return None
@@ -181,9 +166,6 @@ def clear_user_state(chat_id):
     return True
 
 
-# =========================
-# Redis 去重
-# =========================
 def get_last_pushed_tx(chat_id, address):
     if not redis_client:
         return None
@@ -197,9 +179,6 @@ def save_last_pushed_tx(chat_id, address, txid):
     return True
 
 
-# =========================
-# UniSat 数据
-# =========================
 def fetch_rune_events():
     url = "https://open-api.unisat.io/v1/indexer/runes/event"
     params = {"rune": TARGET_RUNE_NAME}
@@ -313,18 +292,12 @@ def get_address_netflow_data(address):
     }
 
 
-# =========================
-# Odin 数据（最小测试版）
-# =========================
-def get_odin_user_activity(principal):
+def get_odin_user_activity_raw(principal):
     url = f"{ODIN_API_BASE}/user/{principal}/activity"
     response = requests.get(url, headers=get_odin_headers(), timeout=20)
-    return response.json(), response.status_code
+    return response
 
 
-# =========================
-# Telegram API
-# =========================
 def send_telegram_message(text, chat_id=None, parse_mode=None, reply_markup=None):
     if not TELEGRAM_BOT_TOKEN:
         return {"success": False, "error": "TELEGRAM_BOT_TOKEN 缺失"}
@@ -386,9 +359,6 @@ def delete_telegram_webhook():
     return response.json()
 
 
-# =========================
-# 文案格式化
-# =========================
 def format_user_config(config):
     watch_list = config.get("watch_addresses", [])
 
@@ -518,9 +488,6 @@ def build_watch_alert_message(address, latest):
     )
 
 
-# =========================
-# 输入状态处理
-# =========================
 def handle_pending_input(chat_id, text):
     state = load_user_state(chat_id)
     action = state.get("action")
@@ -617,9 +584,6 @@ def handle_pending_input(chat_id, text):
     return None
 
 
-# =========================
-# 统一消息处理
-# =========================
 def handle_command(chat_id, text):
     config = load_user_config(chat_id)
     if config is None:
@@ -712,9 +676,6 @@ def process_incoming_message(chat_id, text):
     )
 
 
-# =========================
-# Web 路由
-# =========================
 @app.route("/")
 def home():
     return "Runes Watch Bot is running!"
@@ -752,63 +713,30 @@ def telegram_webhook(secret):
         return jsonify({"success": False, "error": str(e)}), 500
 
 
-@app.route("/poll-bot")
-def poll_bot():
-    if not redis_client:
-        return jsonify({"success": False, "error": "REDIS_URL is missing or Redis not connected"}), 500
-    if not TELEGRAM_BOT_TOKEN:
-        return jsonify({"success": False, "error": "TELEGRAM_BOT_TOKEN is missing"}), 500
-
-    try:
-        data = get_updates_from_telegram()
-
-        if not data.get("ok"):
-            return jsonify({
-                "success": False,
-                "telegram_response": data
-            }), 400
-
-        results = data.get("result", [])
-        processed = []
-
-        for item in results:
-            update_id = item.get("update_id")
-            message = item.get("message", {})
-            text = message.get("text", "")
-            chat = message.get("chat", {})
-            chat_id = chat.get("id")
-
-            if text and chat_id:
-                send_result = process_incoming_message(chat_id, text)
-                processed.append({
-                    "update_id": update_id,
-                    "chat_id": chat_id,
-                    "text": text,
-                    "send_success": send_result.get("success", False)
-                })
-
-            if update_id is not None:
-                save_last_pushed_tx("poll", "offset", str(update_id + 1))
-
-        return jsonify({
-            "success": True,
-            "processed_count": len(processed),
-            "processed": processed
-        })
-    except Exception as e:
-        return jsonify({"success": False, "error": str(e)}), 500
-
-
 @app.route("/odin-user-activity/<principal>")
 def odin_user_activity(principal):
     try:
-        data, status_code = get_odin_user_activity(principal)
+        response = get_odin_user_activity_raw(principal)
+        content_type = response.headers.get("content-type", "")
+        text_body = response.text[:2000]
+
+        parsed_json = None
+        json_error = None
+
+        try:
+            parsed_json = response.json()
+        except Exception as e:
+            json_error = str(e)
+
         return jsonify({
-            "success": status_code == 200,
+            "success": response.status_code == 200 and parsed_json is not None,
             "principal": principal,
-            "status_code": status_code,
-            "odin_response": data
-        }), status_code if status_code != 200 else 200
+            "status_code": response.status_code,
+            "content_type": content_type,
+            "json_parse_error": json_error,
+            "odin_json": parsed_json,
+            "raw_text_preview": text_body
+        }), 200
     except Exception as e:
         return jsonify({
             "success": False,
