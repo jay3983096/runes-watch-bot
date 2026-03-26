@@ -39,6 +39,104 @@ def fetch_rune_events():
     return response.json()
 
 
+def get_address_balance_data(address):
+    url = f"https://open-api.unisat.io/v1/indexer/address/{address}/runes/{TARGET_RUNE_ID}/balance"
+    response = requests.get(url, headers=get_headers(), timeout=20)
+    return response.json()
+
+
+def get_address_netflow_data(address):
+    data = fetch_rune_events()
+
+    if data.get("code") != 0:
+        return {
+            "success": False,
+            "error": "Failed to fetch rune events",
+            "unisat_response": data
+        }
+
+    detail_list = data.get("data", {}).get("detail", [])
+    tx_map = {}
+
+    for item in detail_list:
+        if item.get("address") != address:
+            continue
+
+        txid = item.get("txid")
+        event_type = item.get("type")
+        amount_raw = int(item.get("amount", "0"))
+        divisibility = int(item.get("divisibility", 0))
+        readable_amount = safe_raw_to_readable(amount_raw, divisibility)
+
+        if txid not in tx_map:
+            tx_map[txid] = {
+                "txid": txid,
+                "height": item.get("height"),
+                "timestamp": item.get("timestamp"),
+                "total_receive_raw": 0,
+                "total_send_raw": 0,
+                "total_receive": 0,
+                "total_send": 0,
+                "divisibility": divisibility,
+                "rune_id": item.get("runeId"),
+                "spaced_rune": item.get("spacedRune")
+            }
+
+        if event_type == "receive":
+            tx_map[txid]["total_receive_raw"] += amount_raw
+            tx_map[txid]["total_receive"] += readable_amount
+        elif event_type == "send":
+            tx_map[txid]["total_send_raw"] += amount_raw
+            tx_map[txid]["total_send"] += readable_amount
+
+    results = []
+    for txid, row in tx_map.items():
+        net_raw = row["total_receive_raw"] - row["total_send_raw"]
+        net_readable = row["total_receive"] - row["total_send"]
+
+        if net_raw > 0:
+            direction = "inflow"
+        elif net_raw < 0:
+            direction = "outflow"
+        else:
+            direction = "neutral"
+
+        results.append({
+            "txid": txid,
+            "height": row["height"],
+            "timestamp": row["timestamp"],
+            "total_receive_raw": str(row["total_receive_raw"]),
+            "total_send_raw": str(row["total_send_raw"]),
+            "net_raw": str(net_raw),
+            "total_receive": row["total_receive"],
+            "total_send": row["total_send"],
+            "net_readable": net_readable,
+            "direction": direction,
+            "rune_id": row["rune_id"],
+            "spaced_rune": row["spaced_rune"]
+        })
+
+    results.sort(key=lambda x: x["timestamp"], reverse=True)
+
+    total_inflow = sum(x["net_readable"] for x in results if x["net_readable"] > 0)
+    total_outflow = sum(abs(x["net_readable"]) for x in results if x["net_readable"] < 0)
+    net_position = sum(x["net_readable"] for x in results)
+
+    return {
+        "success": True,
+        "address": address,
+        "target_rune_id": TARGET_RUNE_ID,
+        "target_rune_name": TARGET_RUNE_NAME,
+        "count": len(results),
+        "summary": {
+            "total_inflow": total_inflow,
+            "total_outflow": total_outflow,
+            "net_position": net_position
+        },
+        "netflows": results
+    }
+
+
 def send_telegram_message(text, chat_id=None):
     if not TELEGRAM_BOT_TOKEN:
         return {"success": False, "error": "TELEGRAM_BOT_TOKEN is missing"}
@@ -167,7 +265,9 @@ def handle_command(chat_id, text):
             "/start\n"
             "/setrune <rune_id> <rune_name>\n"
             "/addwatch <address>\n"
-            "/myconfig"
+            "/myconfig\n"
+            "/balance <address>\n"
+            "/summary <address>"
         )
 
     if command == "/setrune":
@@ -205,6 +305,56 @@ def handle_command(chat_id, text):
     if command == "/myconfig":
         return format_user_config(config)
 
+    if command == "/balance":
+        if len(parts) < 2:
+            return "❌ Usage: /balance <address>"
+
+        address = parts[1]
+
+        try:
+            data = get_address_balance_data(address)
+
+            if data.get("code") != 0:
+                return "❌ Failed to fetch address balance."
+
+            rune_data = data.get("data", {})
+            amount_raw = rune_data.get("amount", "0")
+            divisibility = int(rune_data.get("divisibility", 0))
+            readable_amount = safe_raw_to_readable(amount_raw, divisibility)
+
+            return (
+                "💰 Address Balance\n\n"
+                f"Address: {address}\n"
+                f"Rune: {TARGET_RUNE_NAME}\n"
+                f"Balance: {readable_amount}"
+            )
+        except Exception as e:
+            return f"❌ Error fetching balance: {str(e)}"
+
+    if command == "/summary":
+        if len(parts) < 2:
+            return "❌ Usage: /summary <address>"
+
+        address = parts[1]
+
+        try:
+            result = get_address_netflow_data(address)
+            if not result.get("success"):
+                return "❌ Failed to fetch summary."
+
+            summary = result.get("summary", {})
+
+            return (
+                "📊 Address Summary\n\n"
+                f"Address: {address}\n"
+                f"Rune: {TARGET_RUNE_NAME}\n"
+                f"Total Inflow: {summary.get('total_inflow')}\n"
+                f"Total Outflow: {summary.get('total_outflow')}\n"
+                f"Net Position: {summary.get('net_position')}"
+            )
+        except Exception as e:
+            return f"❌ Error fetching summary: {str(e)}"
+
     return "❌ Unknown command. Try /start"
 
 
@@ -235,11 +385,8 @@ def address_balance(address):
     if not UNISAT_API_KEY:
         return jsonify({"success": False, "error": "UNISAT_API_KEY is missing"}), 500
 
-    url = f"https://open-api.unisat.io/v1/indexer/address/{address}/runes/{TARGET_RUNE_ID}/balance"
-
     try:
-        response = requests.get(url, headers=get_headers(), timeout=20)
-        data = response.json()
+        data = get_address_balance_data(address)
 
         if data.get("code") != 0:
             return jsonify({
@@ -324,97 +471,10 @@ def address_netflows(address):
         return jsonify({"success": False, "error": "UNISAT_API_KEY is missing"}), 500
 
     try:
-        data = fetch_rune_events()
-
-        if data.get("code") != 0:
-            return jsonify({
-                "success": False,
-                "address": address,
-                "target_rune_id": TARGET_RUNE_ID,
-                "target_rune_name": TARGET_RUNE_NAME,
-                "unisat_response": data
-            }), 400
-
-        detail_list = data.get("data", {}).get("detail", [])
-        tx_map = {}
-
-        for item in detail_list:
-            if item.get("address") != address:
-                continue
-
-            txid = item.get("txid")
-            event_type = item.get("type")
-            amount_raw = int(item.get("amount", "0"))
-            divisibility = int(item.get("divisibility", 0))
-            readable_amount = safe_raw_to_readable(amount_raw, divisibility)
-
-            if txid not in tx_map:
-                tx_map[txid] = {
-                    "txid": txid,
-                    "height": item.get("height"),
-                    "timestamp": item.get("timestamp"),
-                    "total_receive_raw": 0,
-                    "total_send_raw": 0,
-                    "total_receive": 0,
-                    "total_send": 0,
-                    "divisibility": divisibility,
-                    "rune_id": item.get("runeId"),
-                    "spaced_rune": item.get("spacedRune")
-                }
-
-            if event_type == "receive":
-                tx_map[txid]["total_receive_raw"] += amount_raw
-                tx_map[txid]["total_receive"] += readable_amount
-            elif event_type == "send":
-                tx_map[txid]["total_send_raw"] += amount_raw
-                tx_map[txid]["total_send"] += readable_amount
-
-        results = []
-        for txid, row in tx_map.items():
-            net_raw = row["total_receive_raw"] - row["total_send_raw"]
-            net_readable = row["total_receive"] - row["total_send"]
-
-            if net_raw > 0:
-                direction = "inflow"
-            elif net_raw < 0:
-                direction = "outflow"
-            else:
-                direction = "neutral"
-
-            results.append({
-                "txid": txid,
-                "height": row["height"],
-                "timestamp": row["timestamp"],
-                "total_receive_raw": str(row["total_receive_raw"]),
-                "total_send_raw": str(row["total_send_raw"]),
-                "net_raw": str(net_raw),
-                "total_receive": row["total_receive"],
-                "total_send": row["total_send"],
-                "net_readable": net_readable,
-                "direction": direction,
-                "rune_id": row["rune_id"],
-                "spaced_rune": row["spaced_rune"]
-            })
-
-        results.sort(key=lambda x: x["timestamp"], reverse=True)
-
-        total_inflow = sum(x["net_readable"] for x in results if x["net_readable"] > 0)
-        total_outflow = sum(abs(x["net_readable"]) for x in results if x["net_readable"] < 0)
-        net_position = sum(x["net_readable"] for x in results)
-
-        return jsonify({
-            "success": True,
-            "address": address,
-            "target_rune_id": TARGET_RUNE_ID,
-            "target_rune_name": TARGET_RUNE_NAME,
-            "count": len(results),
-            "summary": {
-                "total_inflow": total_inflow,
-                "total_outflow": total_outflow,
-                "net_position": net_position
-            },
-            "netflows": results
-        })
+        result = get_address_netflow_data(address)
+        if not result.get("success"):
+            return jsonify(result), 400
+        return jsonify(result)
     except Exception as e:
         return jsonify({"success": False, "error": str(e), "address": address}), 500
 
