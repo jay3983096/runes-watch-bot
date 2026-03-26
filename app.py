@@ -7,6 +7,7 @@ app = Flask(__name__)
 UNISAT_API_KEY = os.getenv("UNISAT_API_KEY")
 TARGET_RUNE_ID = os.getenv("TARGET_RUNE_ID")
 TARGET_RUNE_NAME = os.getenv("TARGET_RUNE_NAME")
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 
 
 def get_headers():
@@ -38,10 +39,7 @@ def home():
 @app.route("/test-rune")
 def test_rune():
     if not UNISAT_API_KEY:
-        return jsonify({
-            "success": False,
-            "error": "UNISAT_API_KEY is missing"
-        }), 500
+        return jsonify({"success": False, "error": "UNISAT_API_KEY is missing"}), 500
 
     try:
         data = fetch_rune_events()
@@ -52,19 +50,13 @@ def test_rune():
             "unisat_response": data
         })
     except Exception as e:
-        return jsonify({
-            "success": False,
-            "error": str(e)
-        }), 500
+        return jsonify({"success": False, "error": str(e)}), 500
 
 
 @app.route("/address-balance/<address>")
 def address_balance(address):
     if not UNISAT_API_KEY:
-        return jsonify({
-            "success": False,
-            "error": "UNISAT_API_KEY is missing"
-        }), 500
+        return jsonify({"success": False, "error": "UNISAT_API_KEY is missing"}), 500
 
     url = f"https://open-api.unisat.io/v1/indexer/address/{address}/runes/{TARGET_RUNE_ID}/balance"
 
@@ -97,20 +89,13 @@ def address_balance(address):
             "unisat_response": data
         })
     except Exception as e:
-        return jsonify({
-            "success": False,
-            "error": str(e),
-            "address": address
-        }), 500
+        return jsonify({"success": False, "error": str(e), "address": address}), 500
 
 
 @app.route("/address-events/<address>")
 def address_events(address):
     if not UNISAT_API_KEY:
-        return jsonify({
-            "success": False,
-            "error": "UNISAT_API_KEY is missing"
-        }), 500
+        return jsonify({"success": False, "error": "UNISAT_API_KEY is missing"}), 500
 
     try:
         data = fetch_rune_events()
@@ -153,20 +138,13 @@ def address_events(address):
             "events": matched_events
         })
     except Exception as e:
-        return jsonify({
-            "success": False,
-            "error": str(e),
-            "address": address
-        }), 500
+        return jsonify({"success": False, "error": str(e), "address": address}), 500
 
 
 @app.route("/address-netflows/<address>")
 def address_netflows(address):
     if not UNISAT_API_KEY:
-        return jsonify({
-            "success": False,
-            "error": "UNISAT_API_KEY is missing"
-        }), 500
+        return jsonify({"success": False, "error": "UNISAT_API_KEY is missing"}), 500
 
     try:
         data = fetch_rune_events()
@@ -181,7 +159,6 @@ def address_netflows(address):
             }), 400
 
         detail_list = data.get("data", {}).get("detail", [])
-
         tx_map = {}
 
         for item in detail_list:
@@ -262,11 +239,26 @@ def address_netflows(address):
             "netflows": results
         })
     except Exception as e:
+        return jsonify({"success": False, "error": str(e), "address": address}), 500
+
+
+@app.route("/get-updates")
+def get_updates():
+    if not TELEGRAM_BOT_TOKEN:
+        return jsonify({"success": False, "error": "TELEGRAM_BOT_TOKEN is missing"}), 500
+
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getUpdates"
+
+    try:
+        response = requests.get(url, timeout=20)
+        data = response.json()
+
         return jsonify({
-            "success": False,
-            "error": str(e),
-            "address": address
-        }), 500
+            "success": True,
+            "telegram_response": data
+        })
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 500
 
 
 if __name__ == "__main__":
