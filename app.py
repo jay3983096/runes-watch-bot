@@ -8,6 +8,7 @@ UNISAT_API_KEY = os.getenv("UNISAT_API_KEY")
 TARGET_RUNE_ID = os.getenv("TARGET_RUNE_ID")
 TARGET_RUNE_NAME = os.getenv("TARGET_RUNE_NAME")
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
 
 def get_headers():
@@ -29,6 +30,28 @@ def fetch_rune_events():
     params = {"rune": TARGET_RUNE_NAME}
     response = requests.get(url, headers=get_headers(), params=params, timeout=20)
     return response.json()
+
+
+def send_telegram_message(text):
+    if not TELEGRAM_BOT_TOKEN:
+        return {"success": False, "error": "TELEGRAM_BOT_TOKEN is missing"}
+
+    if not TELEGRAM_CHAT_ID:
+        return {"success": False, "error": "TELEGRAM_CHAT_ID is missing"}
+
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    payload = {
+        "chat_id": TELEGRAM_CHAT_ID,
+        "text": text
+    }
+
+    response = requests.post(url, json=payload, timeout=20)
+    data = response.json()
+
+    return {
+        "success": data.get("ok", False),
+        "telegram_response": data
+    }
 
 
 @app.route("/")
@@ -259,6 +282,19 @@ def get_updates():
         })
     except Exception as e:
         return jsonify({"success": False, "error": str(e)}), 500
+
+
+@app.route("/send-test-message")
+def send_test_message():
+    text = (
+        "✅ Test message from Runes Watch Bot\n\n"
+        f"Rune: {TARGET_RUNE_NAME}\n"
+        f"Rune ID: {TARGET_RUNE_ID}\n"
+        "Status: Telegram push is working."
+    )
+
+    result = send_telegram_message(text)
+    return jsonify(result)
 
 
 if __name__ == "__main__":
