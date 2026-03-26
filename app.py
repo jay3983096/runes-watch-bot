@@ -1,4 +1,4 @@
-from flask import Flask, jsonify, request
+from flask import Flask, jsonify
 import os
 import requests
 import redis
@@ -72,8 +72,11 @@ def tx_url(txid):
 def main_menu_keyboard():
     return {
         "keyboard": [
-            ["📌 设置符文", "➕ 添加监控地址"],
-            ["📋 我的监控列表", "⚙️ 当前配置"]
+            ["设置符文"],
+            ["添加监控地址"],
+            ["我的监控列表"],
+            ["删除监控地址"],
+            ["钱包明细查询"]
         ],
         "resize_keyboard": True
     }
@@ -138,7 +141,7 @@ def list_all_user_chat_ids():
 
 
 # =========================
-# Redis 状态（用于按钮后的下一步输入）
+# Redis 输入状态
 # =========================
 def load_user_state(chat_id):
     if not redis_client:
@@ -168,7 +171,7 @@ def clear_user_state(chat_id):
 
 
 # =========================
-# Redis 监控去重
+# Redis 去重
 # =========================
 def get_last_pushed_tx(chat_id, address):
     if not redis_client:
@@ -384,8 +387,7 @@ def format_user_config(config):
         watch_text = "（空）"
 
     return (
-        "📋 当前配置\n\n"
-        f"聊天 ID：{config.get('chat_id')}\n"
+        "⚙️ 当前配置\n\n"
         f"符文 ID：{config.get('rune_id')}\n"
         f"符文名称：{config.get('rune_name')}\n"
         f"监控地址：\n{watch_text}"
@@ -398,7 +400,7 @@ def format_watch_list(config):
         return "📭 当前没有监控地址。"
 
     lines = [f"{i}. {addr}" for i, addr in enumerate(watch_list, start=1)]
-    return "📌 当前监控地址列表\n\n" + "\n".join(lines)
+    return "📋 我的监控列表\n\n" + "\n".join(lines)
 
 
 def format_history(address, result, limit=5):
@@ -445,6 +447,39 @@ def format_history(address, result, limit=5):
     )
 
 
+def format_wallet_detail(address):
+    try:
+        balance_data = get_address_balance_data(address)
+        if balance_data.get("code") != 0:
+            return f"❌ 查询钱包明细失败：{json.dumps(balance_data, ensure_ascii=False)}", None
+
+        rune_data = balance_data.get("data", {})
+        amount_raw = rune_data.get("amount", "0")
+        divisibility = int(rune_data.get("divisibility", 0))
+        readable_amount = safe_raw_to_readable(amount_raw, divisibility)
+
+        summary_result = get_address_netflow_data(address)
+        if not summary_result.get("success"):
+            return "❌ 查询钱包明细失败：无法获取历史汇总。", None
+
+        summary = summary_result.get("summary", {})
+        history_text = format_history(address, summary_result, limit=3)
+
+        text = (
+            "💼 钱包明细查询\n\n"
+            f"地址：{address}\n"
+            f"符文：{TARGET_RUNE_NAME}\n"
+            f"当前余额：{format_number(readable_amount)}\n"
+            f"总流入：{format_number(summary.get('total_inflow', '0'))}\n"
+            f"总流出：{format_number(summary.get('total_outflow', '0'))}\n"
+            f"净持仓：{format_number(summary.get('net_position', '0'))}\n\n"
+            f"{history_text}"
+        )
+        return text, "HTML"
+    except Exception as e:
+        return f"❌ 查询钱包明细出错：{str(e)}", None
+
+
 def build_watch_alert_message(address, latest):
     direction = latest.get("direction")
     net_amount = format_number(latest.get("net_readable", "0"))
@@ -473,7 +508,7 @@ def build_watch_alert_message(address, latest):
 
 
 # =========================
-# 输入状态处理（按钮后让用户继续输入）
+# 输入状态处理
 # =========================
 def handle_pending_input(chat_id, text):
     state = load_user_state(chat_id)
@@ -532,6 +567,42 @@ def handle_pending_input(chat_id, text):
             "reply_markup": main_menu_keyboard()
         }
 
+    if action == "remove_watch":
+        address = text.strip()
+
+        if address in config["watch_addresses"]:
+            config["watch_addresses"].remove(address)
+            save_user_config(chat_id, config)
+            clear_user_state(chat_id)
+            return {
+                "text": (
+                    "✅ 已移除监控地址\n\n"
+                    f"地址：{address}"
+                ),
+                "parse_mode": None,
+                "reply_markup": main_menu_keyboard()
+            }
+
+        clear_user_state(chat_id)
+        return {
+            "text": (
+                "⚠️ 该地址不在监控列表中\n\n"
+                f"地址：{address}"
+            ),
+            "parse_mode": None,
+            "reply_markup": main_menu_keyboard()
+        }
+
+    if action == "wallet_detail":
+        address = text.strip()
+        clear_user_state(chat_id)
+        text_out, parse_mode = format_wallet_detail(address)
+        return {
+            "text": text_out,
+            "parse_mode": parse_mode,
+            "reply_markup": main_menu_keyboard()
+        }
+
     return None
 
 
@@ -547,8 +618,8 @@ def handle_command(chat_id, text):
             "reply_markup": main_menu_keyboard()
         }
 
-    # 先处理按钮文本
-    if text == "📌 设置符文":
+    # 按钮文本
+    if text == "设置符文":
         save_user_state(chat_id, {"action": "set_rune"})
         return {
             "text": (
@@ -561,7 +632,7 @@ def handle_command(chat_id, text):
             "reply_markup": main_menu_keyboard()
         }
 
-    if text == "➕ 添加监控地址":
+    if text == "添加监控地址":
         save_user_state(chat_id, {"action": "add_watch"})
         return {
             "text": "请直接发送你要添加的监控地址。",
@@ -569,7 +640,7 @@ def handle_command(chat_id, text):
             "reply_markup": main_menu_keyboard()
         }
 
-    if text == "📋 我的监控列表":
+    if text == "我的监控列表":
         clear_user_state(chat_id)
         return {
             "text": format_watch_list(config),
@@ -577,26 +648,35 @@ def handle_command(chat_id, text):
             "reply_markup": main_menu_keyboard()
         }
 
-    if text == "⚙️ 当前配置":
-        clear_user_state(chat_id)
+    if text == "删除监控地址":
+        save_user_state(chat_id, {"action": "remove_watch"})
         return {
-            "text": format_user_config(config),
+            "text": "请直接发送你要删除的监控地址。",
             "parse_mode": None,
             "reply_markup": main_menu_keyboard()
         }
 
-    # 如果不是命令，先看是否处于等待输入状态
+    if text == "钱包明细查询":
+        save_user_state(chat_id, {"action": "wallet_detail"})
+        return {
+            "text": "请直接发送你要查询的钱包地址。",
+            "parse_mode": None,
+            "reply_markup": main_menu_keyboard()
+        }
+
+    # 非命令，先看是否有等待输入状态
     if not text.startswith("/"):
         pending_result = handle_pending_input(chat_id, text)
         if pending_result:
             return pending_result
 
         return {
-            "text": "❌ 无法识别你的输入。你可以点击下方按钮继续操作，或发送 /start 查看帮助。",
+            "text": "❌ 无法识别你的输入。请点击下方按钮继续操作，或发送 /start 查看帮助。",
             "parse_mode": None,
             "reply_markup": main_menu_keyboard()
         }
 
+    # 保留命令兼容
     parts = text.strip().split()
     if not parts:
         return {
@@ -612,225 +692,14 @@ def handle_command(chat_id, text):
         return {
             "text": (
                 "✅ Runes 监控机器人已就绪。\n\n"
-                "你可以直接点击下方按钮操作，\n"
-                "也可以使用命令：\n"
-                "/start\n"
-                "/setrune <符文ID> <符文名称>\n"
-                "/addwatch <地址>\n"
-                "/removewatch <地址>\n"
-                "/listwatch\n"
-                "/myconfig\n"
-                "/balance <地址>\n"
-                "/summary <地址>\n"
-                "/history <地址>"
+                "请直接点击下方按钮操作。"
             ),
             "parse_mode": None,
             "reply_markup": main_menu_keyboard()
         }
-
-    if command == "/setrune":
-        if len(parts) < 3:
-            return {
-                "text": "❌ 用法：/setrune <符文ID> <符文名称>",
-                "parse_mode": None,
-                "reply_markup": main_menu_keyboard()
-            }
-
-        rune_id = parts[1]
-        rune_name = " ".join(parts[2:])
-        config["rune_id"] = rune_id
-        config["rune_name"] = rune_name
-        save_user_config(chat_id, config)
-        clear_user_state(chat_id)
-
-        return {
-            "text": (
-                "✅ 已设置监控符文\n\n"
-                f"符文 ID：{rune_id}\n"
-                f"符文名称：{rune_name}"
-            ),
-            "parse_mode": None,
-            "reply_markup": main_menu_keyboard()
-        }
-
-    if command == "/addwatch":
-        if len(parts) < 2:
-            return {
-                "text": "❌ 用法：/addwatch <地址>",
-                "parse_mode": None,
-                "reply_markup": main_menu_keyboard()
-            }
-
-        address = parts[1]
-        if address not in config["watch_addresses"]:
-            config["watch_addresses"].append(address)
-            save_user_config(chat_id, config)
-        clear_user_state(chat_id)
-
-        return {
-            "text": (
-                "✅ 已添加监控地址\n\n"
-                f"地址：{address}"
-            ),
-            "parse_mode": None,
-            "reply_markup": main_menu_keyboard()
-        }
-
-    if command == "/removewatch":
-        if len(parts) < 2:
-            return {
-                "text": "❌ 用法：/removewatch <地址>",
-                "parse_mode": None,
-                "reply_markup": main_menu_keyboard()
-            }
-
-        address = parts[1]
-        if address in config["watch_addresses"]:
-            config["watch_addresses"].remove(address)
-            save_user_config(chat_id, config)
-            return {
-                "text": (
-                    "✅ 已移除监控地址\n\n"
-                    f"地址：{address}"
-                ),
-                "parse_mode": None,
-                "reply_markup": main_menu_keyboard()
-            }
-
-        return {
-            "text": (
-                "⚠️ 该地址不在监控列表中\n\n"
-                f"地址：{address}"
-            ),
-            "parse_mode": None,
-            "reply_markup": main_menu_keyboard()
-        }
-
-    if command == "/listwatch":
-        return {
-            "text": format_watch_list(config),
-            "parse_mode": None,
-            "reply_markup": main_menu_keyboard()
-        }
-
-    if command == "/myconfig":
-        return {
-            "text": format_user_config(config),
-            "parse_mode": None,
-            "reply_markup": main_menu_keyboard()
-        }
-
-    if command == "/balance":
-        if len(parts) < 2:
-            return {
-                "text": "❌ 用法：/balance <地址>",
-                "parse_mode": None,
-                "reply_markup": main_menu_keyboard()
-            }
-
-        address = parts[1]
-        try:
-            data = get_address_balance_data(address)
-
-            if data.get("code") != 0:
-                return {
-                    "text": f"❌ 查询余额失败：{json.dumps(data, ensure_ascii=False)}",
-                    "parse_mode": None,
-                    "reply_markup": main_menu_keyboard()
-                }
-
-            rune_data = data.get("data", {})
-            amount_raw = rune_data.get("amount", "0")
-            divisibility = int(rune_data.get("divisibility", 0))
-            readable_amount = safe_raw_to_readable(amount_raw, divisibility)
-
-            return {
-                "text": (
-                    "💰 地址余额\n\n"
-                    f"地址：{address}\n"
-                    f"符文：{TARGET_RUNE_NAME}\n"
-                    f"余额：{format_number(readable_amount)}"
-                ),
-                "parse_mode": None,
-                "reply_markup": main_menu_keyboard()
-            }
-        except Exception as e:
-            return {
-                "text": f"❌ 查询余额出错：{str(e)}",
-                "parse_mode": None,
-                "reply_markup": main_menu_keyboard()
-            }
-
-    if command == "/summary":
-        if len(parts) < 2:
-            return {
-                "text": "❌ 用法：/summary <地址>",
-                "parse_mode": None,
-                "reply_markup": main_menu_keyboard()
-            }
-
-        address = parts[1]
-        try:
-            result = get_address_netflow_data(address)
-            if not result.get("success"):
-                return {
-                    "text": "❌ 查询汇总失败。",
-                    "parse_mode": None,
-                    "reply_markup": main_menu_keyboard()
-                }
-
-            summary = result.get("summary", {})
-            return {
-                "text": (
-                    "📊 地址汇总\n\n"
-                    f"地址：{address}\n"
-                    f"符文：{TARGET_RUNE_NAME}\n"
-                    f"总流入：{format_number(summary.get('total_inflow', '0'))}\n"
-                    f"总流出：{format_number(summary.get('total_outflow', '0'))}\n"
-                    f"净持仓：{format_number(summary.get('net_position', '0'))}"
-                ),
-                "parse_mode": None,
-                "reply_markup": main_menu_keyboard()
-            }
-        except Exception as e:
-            return {
-                "text": f"❌ 查询汇总出错：{str(e)}",
-                "parse_mode": None,
-                "reply_markup": main_menu_keyboard()
-            }
-
-    if command == "/history":
-        if len(parts) < 2:
-            return {
-                "text": "❌ 用法：/history <地址>",
-                "parse_mode": None,
-                "reply_markup": main_menu_keyboard()
-            }
-
-        address = parts[1]
-        try:
-            result = get_address_netflow_data(address)
-            if not result.get("success"):
-                return {
-                    "text": "❌ 查询历史失败。",
-                    "parse_mode": None,
-                    "reply_markup": main_menu_keyboard()
-                }
-
-            return {
-                "text": format_history(address, result, limit=5),
-                "parse_mode": "HTML",
-                "reply_markup": main_menu_keyboard()
-            }
-        except Exception as e:
-            return {
-                "text": f"❌ 查询历史出错：{str(e)}",
-                "parse_mode": None,
-                "reply_markup": main_menu_keyboard()
-            }
 
     return {
-        "text": "❌ 未知命令，请先使用 /start 查看帮助。",
+        "text": "❌ 未知命令。请直接点击下方按钮操作。",
         "parse_mode": None,
         "reply_markup": main_menu_keyboard()
     }
