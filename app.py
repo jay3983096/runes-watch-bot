@@ -315,7 +315,7 @@ def handle_command(chat_id, text):
             data = get_address_balance_data(address)
 
             if data.get("code") != 0:
-                return "❌ Failed to fetch address balance."
+                return f"❌ Balance fetch failed: {json.dumps(data, ensure_ascii=False)}"
 
             rune_data = data.get("data", {})
             amount_raw = rune_data.get("amount", "0")
@@ -361,211 +361,6 @@ def handle_command(chat_id, text):
 @app.route("/")
 def home():
     return "Runes Watch Bot is running!"
-
-
-@app.route("/test-rune")
-def test_rune():
-    if not UNISAT_API_KEY:
-        return jsonify({"success": False, "error": "UNISAT_API_KEY is missing"}), 500
-
-    try:
-        data = fetch_rune_events()
-        return jsonify({
-            "success": True,
-            "target_rune_id": TARGET_RUNE_ID,
-            "target_rune_name": TARGET_RUNE_NAME,
-            "unisat_response": data
-        })
-    except Exception as e:
-        return jsonify({"success": False, "error": str(e)}), 500
-
-
-@app.route("/address-balance/<address>")
-def address_balance(address):
-    if not UNISAT_API_KEY:
-        return jsonify({"success": False, "error": "UNISAT_API_KEY is missing"}), 500
-
-    try:
-        data = get_address_balance_data(address)
-
-        if data.get("code") != 0:
-            return jsonify({
-                "success": False,
-                "address": address,
-                "target_rune_id": TARGET_RUNE_ID,
-                "target_rune_name": TARGET_RUNE_NAME,
-                "unisat_response": data
-            }), 400
-
-        rune_data = data.get("data", {})
-        amount_raw = rune_data.get("amount", "0")
-        divisibility = int(rune_data.get("divisibility", 0))
-        readable_amount = safe_raw_to_readable(amount_raw, divisibility)
-
-        return jsonify({
-            "success": True,
-            "address": address,
-            "target_rune_id": TARGET_RUNE_ID,
-            "target_rune_name": TARGET_RUNE_NAME,
-            "amount_raw": amount_raw,
-            "divisibility": divisibility,
-            "readable_amount": readable_amount,
-            "unisat_response": data
-        })
-    except Exception as e:
-        return jsonify({"success": False, "error": str(e), "address": address}), 500
-
-
-@app.route("/address-events/<address>")
-def address_events(address):
-    if not UNISAT_API_KEY:
-        return jsonify({"success": False, "error": "UNISAT_API_KEY is missing"}), 500
-
-    try:
-        data = fetch_rune_events()
-
-        if data.get("code") != 0:
-            return jsonify({
-                "success": False,
-                "address": address,
-                "target_rune_id": TARGET_RUNE_ID,
-                "target_rune_name": TARGET_RUNE_NAME,
-                "unisat_response": data
-            }), 400
-
-        detail_list = data.get("data", {}).get("detail", [])
-        matched_events = []
-
-        for item in detail_list:
-            if item.get("address") == address:
-                amount_raw = item.get("amount", "0")
-                divisibility = int(item.get("divisibility", 0))
-                readable_amount = safe_raw_to_readable(amount_raw, divisibility)
-
-                matched_events.append({
-                    "txid": item.get("txid"),
-                    "type": item.get("type"),
-                    "amount_raw": amount_raw,
-                    "readable_amount": readable_amount,
-                    "height": item.get("height"),
-                    "timestamp": item.get("timestamp"),
-                    "rune_id": item.get("runeId"),
-                    "spaced_rune": item.get("spacedRune")
-                })
-
-        return jsonify({
-            "success": True,
-            "address": address,
-            "target_rune_id": TARGET_RUNE_ID,
-            "target_rune_name": TARGET_RUNE_NAME,
-            "count": len(matched_events),
-            "events": matched_events
-        })
-    except Exception as e:
-        return jsonify({"success": False, "error": str(e), "address": address}), 500
-
-
-@app.route("/address-netflows/<address>")
-def address_netflows(address):
-    if not UNISAT_API_KEY:
-        return jsonify({"success": False, "error": "UNISAT_API_KEY is missing"}), 500
-
-    try:
-        result = get_address_netflow_data(address)
-        if not result.get("success"):
-            return jsonify(result), 400
-        return jsonify(result)
-    except Exception as e:
-        return jsonify({"success": False, "error": str(e), "address": address}), 500
-
-
-@app.route("/get-updates")
-def get_updates():
-    if not TELEGRAM_BOT_TOKEN:
-        return jsonify({"success": False, "error": "TELEGRAM_BOT_TOKEN is missing"}), 500
-
-    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getUpdates"
-
-    try:
-        response = requests.get(url, timeout=20)
-        data = response.json()
-        return jsonify({
-            "success": True,
-            "telegram_response": data
-        })
-    except Exception as e:
-        return jsonify({"success": False, "error": str(e)}), 500
-
-
-@app.route("/send-test-message")
-def send_test_message():
-    text = (
-        "✅ Test message from Runes Watch Bot\n\n"
-        f"Rune: {TARGET_RUNE_NAME}\n"
-        f"Rune ID: {TARGET_RUNE_ID}\n"
-        "Status: Telegram push is working."
-    )
-
-    result = send_telegram_message(text)
-    return jsonify(result)
-
-
-@app.route("/set-config-rune/<chat_id>")
-def set_config_rune(chat_id):
-    if not redis_client:
-        return jsonify({"success": False, "error": "REDIS_URL is missing or Redis not connected"}), 500
-
-    rune_id = request.args.get("rune_id")
-    rune_name = request.args.get("rune_name")
-
-    if not rune_id or not rune_name:
-        return jsonify({
-            "success": False,
-            "error": "rune_id and rune_name are required"
-        }), 400
-
-    config = load_user_config(chat_id)
-    config["rune_id"] = rune_id
-    config["rune_name"] = rune_name
-
-    save_user_config(chat_id, config)
-
-    return jsonify({
-        "success": True,
-        "message": "Rune config saved",
-        "config": config
-    })
-
-
-@app.route("/add-watch/<chat_id>/<address>")
-def add_watch(chat_id, address):
-    if not redis_client:
-        return jsonify({"success": False, "error": "REDIS_URL is missing or Redis not connected"}), 500
-
-    config = load_user_config(chat_id)
-
-    if address not in config["watch_addresses"]:
-        config["watch_addresses"].append(address)
-        save_user_config(chat_id, config)
-
-    return jsonify({
-        "success": True,
-        "message": "Watch address added",
-        "config": config
-    })
-
-
-@app.route("/get-config/<chat_id>")
-def get_config(chat_id):
-    if not redis_client:
-        return jsonify({"success": False, "error": "REDIS_URL is missing or Redis not connected"}), 500
-
-    config = load_user_config(chat_id)
-
-    return jsonify({
-        "success": True,
-        "config": config
-    })
 
 
 @app.route("/poll-bot")
@@ -617,6 +412,15 @@ def poll_bot():
         })
     except Exception as e:
         return jsonify({"success": False, "error": str(e)}), 500
+
+
+@app.route("/get-config/<chat_id>")
+def get_config(chat_id):
+    if not redis_client:
+        return jsonify({"success": False, "error": "REDIS_URL is missing or Redis not connected"}), 500
+
+    config = load_user_config(chat_id)
+    return jsonify({"success": True, "config": config})
 
 
 if __name__ == "__main__":
