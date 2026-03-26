@@ -1,6 +1,8 @@
 from flask import Flask, jsonify
 import os
 import requests
+import redis
+import json
 
 app = Flask(__name__)
 
@@ -9,6 +11,11 @@ TARGET_RUNE_ID = os.getenv("TARGET_RUNE_ID")
 TARGET_RUNE_NAME = os.getenv("TARGET_RUNE_NAME")
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+REDIS_URL = os.getenv("REDIS_URL")
+
+redis_client = None
+if REDIS_URL:
+    redis_client = redis.from_url(REDIS_URL, decode_responses=True)
 
 
 def get_headers():
@@ -52,6 +59,34 @@ def send_telegram_message(text):
         "success": data.get("ok", False),
         "telegram_response": data
     }
+
+
+def get_user_key(chat_id):
+    return f"user_config:{chat_id}"
+
+
+def load_user_config(chat_id):
+    if not redis_client:
+        return None
+
+    raw = redis_client.get(get_user_key(chat_id))
+    if not raw:
+        return {
+            "chat_id": chat_id,
+            "rune_id": None,
+            "rune_name": None,
+            "watch_addresses": []
+        }
+
+    return json.loads(raw)
+
+
+def save_user_config(chat_id, config):
+    if not redis_client:
+        return False
+
+    redis_client.set(get_user_key(chat_id), json.dumps(config))
+    return True
 
 
 @app.route("/")
@@ -295,6 +330,55 @@ def send_test_message():
 
     result = send_telegram_message(text)
     return jsonify(result)
+
+
+@app.route("/set-config-rune/<chat_id>/<rune_id>/<rune_name>")
+def set_config_rune(chat_id, rune_id, rune_name):
+    if not redis_client:
+        return jsonify({"success": False, "error": "REDIS_URL is missing or Redis not connected"}), 500
+
+    config = load_user_config(chat_id)
+    config["rune_id"] = rune_id
+    config["rune_name"] = rune_name
+
+    save_user_config(chat_id, config)
+
+    return jsonify({
+        "success": True,
+        "message": "Rune config saved",
+        "config": config
+    })
+
+
+@app.route("/add-watch/<chat_id>/<address>")
+def add_watch(chat_id, address):
+    if not redis_client:
+        return jsonify({"success": False, "error": "REDIS_URL is missing or Redis not connected"}), 500
+
+    config = load_user_config(chat_id)
+
+    if address not in config["watch_addresses"]:
+        config["watch_addresses"].append(address)
+        save_user_config(chat_id, config)
+
+    return jsonify({
+        "success": True,
+        "message": "Watch address added",
+        "config": config
+    })
+
+
+@app.route("/get-config/<chat_id>")
+def get_config(chat_id):
+    if not redis_client:
+        return jsonify({"success": False, "error": "REDIS_URL is missing or Redis not connected"}), 500
+
+    config = load_user_config(chat_id)
+
+    return jsonify({
+        "success": True,
+        "config": config
+    })
 
 
 if __name__ == "__main__":
