@@ -1,4 +1,4 @@
-from flask import Flask, jsonify
+from flask import Flask, jsonify, request
 import os
 import requests
 import redis
@@ -72,7 +72,7 @@ def load_user_config(chat_id):
     raw = redis_client.get(get_user_key(chat_id))
     if not raw:
         return {
-            "chat_id": chat_id,
+            "chat_id": str(chat_id),
             "rune_id": None,
             "rune_name": None,
             "watch_addresses": []
@@ -332,10 +332,19 @@ def send_test_message():
     return jsonify(result)
 
 
-@app.route("/set-config-rune/<chat_id>/<rune_id>/<rune_name>")
-def set_config_rune(chat_id, rune_id, rune_name):
+@app.route("/set-config-rune/<chat_id>")
+def set_config_rune(chat_id):
     if not redis_client:
         return jsonify({"success": False, "error": "REDIS_URL is missing or Redis not connected"}), 500
+
+    rune_id = request.args.get("rune_id")
+    rune_name = request.args.get("rune_name")
+
+    if not rune_id or not rune_name:
+        return jsonify({
+            "success": False,
+            "error": "rune_id and rune_name are required"
+        }), 400
 
     config = load_user_config(chat_id)
     config["rune_id"] = rune_id
