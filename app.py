@@ -1,4 +1,4 @@
-from flask import Flask, jsonify
+from flask import Flask, jsonify, request
 import os
 import requests
 import redis
@@ -15,6 +15,10 @@ TARGET_RUNE_NAME = os.getenv("TARGET_RUNE_NAME")
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 REDIS_URL = os.getenv("REDIS_URL")
+WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET")
+
+# 你的 Render Web Service 公网地址
+WEB_BASE_URL = "https://runes-watch-bot.onrender.com"
 
 SGT = timezone(timedelta(hours=8))
 
@@ -87,10 +91,6 @@ def main_menu_keyboard():
 # =========================
 def get_user_key(chat_id):
     return f"user_config:{chat_id}"
-
-
-def get_bot_offset_key():
-    return "bot_update_offset"
 
 
 def get_last_tx_key(chat_id, address):
@@ -183,31 +183,6 @@ def save_last_pushed_tx(chat_id, address, txid):
     if not redis_client:
         return False
     redis_client.set(get_last_tx_key(chat_id, address), txid)
-    return True
-
-
-# =========================
-# Bot offset
-# =========================
-def get_bot_offset():
-    if not redis_client:
-        return None
-
-    offset = redis_client.get(get_bot_offset_key())
-    if not offset:
-        return None
-
-    try:
-        return int(offset)
-    except Exception:
-        return None
-
-
-def save_bot_offset(offset):
-    if not redis_client:
-        return False
-
-    redis_client.set(get_bot_offset_key(), str(offset))
     return True
 
 
@@ -328,7 +303,7 @@ def get_address_netflow_data(address):
 
 
 # =========================
-# Telegram 发送
+# Telegram API
 # =========================
 def send_telegram_message(text, chat_id=None, parse_mode=None, reply_markup=None):
     if not TELEGRAM_BOT_TOKEN:
@@ -360,18 +335,34 @@ def send_telegram_message(text, chat_id=None, parse_mode=None, reply_markup=None
     }
 
 
-def get_updates_from_telegram():
+def set_telegram_webhook():
+    if not TELEGRAM_BOT_TOKEN:
+        return {"ok": False, "error": "TELEGRAM_BOT_TOKEN 缺失"}
+    if not WEBHOOK_SECRET:
+        return {"ok": False, "error": "WEBHOOK_SECRET 缺失"}
+
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/setWebhook"
+    webhook_url = f"{WEB_BASE_URL}/webhook/{WEBHOOK_SECRET}"
+
+    payload = {
+        "url": webhook_url,
+        "drop_pending_updates": True
+    }
+
+    response = requests.post(url, json=payload, timeout=20)
+    return response.json()
+
+
+def delete_telegram_webhook():
     if not TELEGRAM_BOT_TOKEN:
         return {"ok": False, "error": "TELEGRAM_BOT_TOKEN 缺失"}
 
-    offset = get_bot_offset()
-    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getUpdates"
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/deleteWebhook"
+    payload = {
+        "drop_pending_updates": False
+    }
 
-    params = {}
-    if offset is not None:
-        params["offset"] = offset
-
-    response = requests.get(url, params=params, timeout=20)
+    response = requests.post(url, json=payload, timeout=20)
     return response.json()
 
 
@@ -607,7 +598,7 @@ def handle_pending_input(chat_id, text):
 
 
 # =========================
-# 命令 / 按钮处理
+# 统一消息处理
 # =========================
 def handle_command(chat_id, text):
     config = load_user_config(chat_id)
@@ -664,36 +655,25 @@ def handle_command(chat_id, text):
             "reply_markup": main_menu_keyboard()
         }
 
-    # 非命令，先看是否有等待输入状态
+    # 非命令，先看是否是等待输入
     if not text.startswith("/"):
         pending_result = handle_pending_input(chat_id, text)
         if pending_result:
             return pending_result
 
         return {
-            "text": "❌ 无法识别你的输入。请点击下方按钮继续操作，或发送 /start 查看帮助。",
+            "text": "❌ 无法识别你的输入。请点击下方按钮继续操作。",
             "parse_mode": None,
             "reply_markup": main_menu_keyboard()
         }
 
-    # 保留命令兼容
-    parts = text.strip().split()
-    if not parts:
-        return {
-            "text": "❌ 空命令。",
-            "parse_mode": None,
-            "reply_markup": main_menu_keyboard()
-        }
-
-    command = parts[0].lower()
+    # 命令兼容
+    command = text.strip().lower()
 
     if command == "/start":
         clear_user_state(chat_id)
         return {
-            "text": (
-                "✅ Runes 监控机器人已就绪。\n\n"
-                "请直接点击下方按钮操作。"
-            ),
+            "text": "✅ Runes 监控机器人已就绪。\n\n请直接点击下方按钮操作。",
             "parse_mode": None,
             "reply_markup": main_menu_keyboard()
         }
@@ -705,6 +685,16 @@ def handle_command(chat_id, text):
     }
 
 
+def process_incoming_message(chat_id, text):
+    reply = handle_command(str(chat_id), text)
+    return send_telegram_message(
+        reply["text"],
+        chat_id=str(chat_id),
+        parse_mode=reply.get("parse_mode"),
+        reply_markup=reply.get("reply_markup")
+    )
+
+
 # =========================
 # Web 路由
 # =========================
@@ -713,11 +703,43 @@ def home():
     return "Runes Watch Bot is running!"
 
 
+@app.route("/set-webhook")
+def set_webhook_route():
+    result = set_telegram_webhook()
+    return jsonify(result)
+
+
+@app.route("/delete-webhook")
+def delete_webhook_route():
+    result = delete_telegram_webhook()
+    return jsonify(result)
+
+
+@app.route("/webhook/<secret>", methods=["POST"])
+def telegram_webhook(secret):
+    if not WEBHOOK_SECRET or secret != WEBHOOK_SECRET:
+        return jsonify({"success": False, "error": "invalid secret"}), 403
+
+    try:
+        update = request.get_json(force=True, silent=True) or {}
+        message = update.get("message", {})
+        text = message.get("text", "")
+        chat = message.get("chat", {})
+        chat_id = chat.get("id")
+
+        if text and chat_id:
+            process_incoming_message(chat_id, text)
+
+        return jsonify({"success": True})
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
 @app.route("/poll-bot")
 def poll_bot():
+    # 保留兼容，便于迁移期手动排查
     if not redis_client:
         return jsonify({"success": False, "error": "REDIS_URL is missing or Redis not connected"}), 500
-
     if not TELEGRAM_BOT_TOKEN:
         return jsonify({"success": False, "error": "TELEGRAM_BOT_TOKEN is missing"}), 500
 
@@ -741,22 +763,15 @@ def poll_bot():
             chat_id = chat.get("id")
 
             if text and chat_id:
-                reply = handle_command(str(chat_id), text)
-                send_result = send_telegram_message(
-                    reply["text"],
-                    chat_id=str(chat_id),
-                    parse_mode=reply.get("parse_mode"),
-                    reply_markup=reply.get("reply_markup")
-                )
-
+                send_result = process_incoming_message(chat_id, text)
                 processed.append({
                     "update_id": update_id,
                     "chat_id": chat_id,
                     "text": text,
-                    "reply_text": reply["text"],
                     "send_success": send_result.get("success", False)
                 })
 
+            # webhook 模式下通常不会再用 offset，但保留不影响
             if update_id is not None:
                 save_bot_offset(int(update_id) + 1)
 
