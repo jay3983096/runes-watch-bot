@@ -252,6 +252,18 @@ def save_user_config(chat_id, config):
     return True
 
 
+def list_all_user_chat_ids():
+    if not redis_client:
+        return []
+
+    keys = redis_client.keys("user_config:*")
+    chat_ids = []
+    for key in keys:
+        if key.startswith("user_config:"):
+            chat_ids.append(key.split("user_config:", 1)[1])
+    return chat_ids
+
+
 def get_bot_offset():
     if not redis_client:
         return None
@@ -359,21 +371,41 @@ def format_history(address, result, limit=5):
     )
 
 
+def build_watch_alert_message(address, latest):
+    direction = latest.get("direction")
+    net_amount = format_number(latest.get("net_readable", "0"))
+    time_text = format_ts(latest.get("timestamp"))
+    txid = latest.get("txid")
+
+    if direction == "inflow":
+        emoji = "🟢"
+        direction_cn = "流入"
+        sign = "+"
+    elif direction == "outflow":
+        emoji = "🔴"
+        direction_cn = "流出"
+        sign = "-"
+    else:
+        emoji = "⚪"
+        direction_cn = "无变化"
+        sign = ""
+
+    return (
+        f"{emoji} 地址活动提醒\n\n"
+        f"1. {direction_cn} {sign}{net_amount}\n"
+        f"   时间：{time_text}\n"
+        f'   <a href="{escape(tx_url(txid))}">查看</a>'
+    )
+
+
 def handle_command(chat_id, text):
     config = load_user_config(chat_id)
     if config is None:
-        return {
-            "text": "❌ Redis 未连接。",
-            "parse_mode": None
-        }
+        return {"text": "❌ Redis 未连接。", "parse_mode": None}
 
     parts = text.strip().split()
-
     if not parts:
-        return {
-            "text": "❌ 空命令。",
-            "parse_mode": None
-        }
+        return {"text": "❌ 空命令。", "parse_mode": None}
 
     command = parts[0].lower()
 
@@ -397,14 +429,10 @@ def handle_command(chat_id, text):
 
     if command == "/setrune":
         if len(parts) < 3:
-            return {
-                "text": "❌ 用法：/setrune <符文ID> <符文名称>",
-                "parse_mode": None
-            }
+            return {"text": "❌ 用法：/setrune <符文ID> <符文名称>", "parse_mode": None}
 
         rune_id = parts[1]
         rune_name = " ".join(parts[2:])
-
         config["rune_id"] = rune_id
         config["rune_name"] = rune_name
         save_user_config(chat_id, config)
@@ -420,13 +448,9 @@ def handle_command(chat_id, text):
 
     if command == "/addwatch":
         if len(parts) < 2:
-            return {
-                "text": "❌ 用法：/addwatch <地址>",
-                "parse_mode": None
-            }
+            return {"text": "❌ 用法：/addwatch <地址>", "parse_mode": None}
 
         address = parts[1]
-
         if address not in config["watch_addresses"]:
             config["watch_addresses"].append(address)
             save_user_config(chat_id, config)
@@ -441,13 +465,9 @@ def handle_command(chat_id, text):
 
     if command == "/removewatch":
         if len(parts) < 2:
-            return {
-                "text": "❌ 用法：/removewatch <地址>",
-                "parse_mode": None
-            }
+            return {"text": "❌ 用法：/removewatch <地址>", "parse_mode": None}
 
         address = parts[1]
-
         if address in config["watch_addresses"]:
             config["watch_addresses"].remove(address)
             save_user_config(chat_id, config)
@@ -468,26 +488,16 @@ def handle_command(chat_id, text):
         }
 
     if command == "/listwatch":
-        return {
-            "text": format_watch_list(config),
-            "parse_mode": None
-        }
+        return {"text": format_watch_list(config), "parse_mode": None}
 
     if command == "/myconfig":
-        return {
-            "text": format_user_config(config),
-            "parse_mode": None
-        }
+        return {"text": format_user_config(config), "parse_mode": None}
 
     if command == "/balance":
         if len(parts) < 2:
-            return {
-                "text": "❌ 用法：/balance <地址>",
-                "parse_mode": None
-            }
+            return {"text": "❌ 用法：/balance <地址>", "parse_mode": None}
 
         address = parts[1]
-
         try:
             data = get_address_balance_data(address)
 
@@ -512,30 +522,19 @@ def handle_command(chat_id, text):
                 "parse_mode": None
             }
         except Exception as e:
-            return {
-                "text": f"❌ 查询余额出错：{str(e)}",
-                "parse_mode": None
-            }
+            return {"text": f"❌ 查询余额出错：{str(e)}", "parse_mode": None}
 
     if command == "/summary":
         if len(parts) < 2:
-            return {
-                "text": "❌ 用法：/summary <地址>",
-                "parse_mode": None
-            }
+            return {"text": "❌ 用法：/summary <地址>", "parse_mode": None}
 
         address = parts[1]
-
         try:
             result = get_address_netflow_data(address)
             if not result.get("success"):
-                return {
-                    "text": "❌ 查询汇总失败。",
-                    "parse_mode": None
-                }
+                return {"text": "❌ 查询汇总失败。", "parse_mode": None}
 
             summary = result.get("summary", {})
-
             return {
                 "text": (
                     "📊 地址汇总\n\n"
@@ -548,42 +547,26 @@ def handle_command(chat_id, text):
                 "parse_mode": None
             }
         except Exception as e:
-            return {
-                "text": f"❌ 查询汇总出错：{str(e)}",
-                "parse_mode": None
-            }
+            return {"text": f"❌ 查询汇总出错：{str(e)}", "parse_mode": None}
 
     if command == "/history":
         if len(parts) < 2:
-            return {
-                "text": "❌ 用法：/history <地址>",
-                "parse_mode": None
-            }
+            return {"text": "❌ 用法：/history <地址>", "parse_mode": None}
 
         address = parts[1]
-
         try:
             result = get_address_netflow_data(address)
             if not result.get("success"):
-                return {
-                    "text": "❌ 查询历史失败。",
-                    "parse_mode": None
-                }
+                return {"text": "❌ 查询历史失败。", "parse_mode": None}
 
             return {
                 "text": format_history(address, result, limit=5),
                 "parse_mode": "HTML"
             }
         except Exception as e:
-            return {
-                "text": f"❌ 查询历史出错：{str(e)}",
-                "parse_mode": None
-            }
+            return {"text": f"❌ 查询历史出错：{str(e)}", "parse_mode": None}
 
-    return {
-        "text": "❌ 未知命令，请先使用 /start 查看帮助。",
-        "parse_mode": None
-    }
+    return {"text": "❌ 未知命令，请先使用 /start 查看帮助。", "parse_mode": None}
 
 
 @app.route("/")
@@ -595,7 +578,6 @@ def home():
 def poll_bot():
     if not redis_client:
         return jsonify({"success": False, "error": "REDIS_URL is missing or Redis not connected"}), 500
-
     if not TELEGRAM_BOT_TOKEN:
         return jsonify({"success": False, "error": "TELEGRAM_BOT_TOKEN is missing"}), 500
 
@@ -603,10 +585,7 @@ def poll_bot():
         data = get_updates_from_telegram()
 
         if not data.get("ok"):
-            return jsonify({
-                "success": False,
-                "telegram_response": data
-            }), 400
+            return jsonify({"success": False, "telegram_response": data}), 400
 
         results = data.get("result", [])
         processed = []
@@ -705,31 +684,7 @@ def check_watches(chat_id):
             })
             continue
 
-        direction = latest.get("direction")
-        net_amount = format_number(latest.get("net_readable", "0"))
-        time_text = format_ts(latest.get("timestamp"))
-        txid = latest.get("txid")
-
-        if direction == "inflow":
-            emoji = "🟢"
-            direction_cn = "流入"
-            sign = "+"
-        elif direction == "outflow":
-            emoji = "🔴"
-            direction_cn = "流出"
-            sign = "-"
-        else:
-            emoji = "⚪"
-            direction_cn = "无变化"
-            sign = ""
-
-        message = (
-            f"{emoji} 地址活动提醒\n\n"
-            f"1. {direction_cn} {sign}{net_amount}\n"
-            f"   时间：{time_text}\n"
-            f'   <a href="{escape(tx_url(txid))}">查看</a>'
-        )
-
+        message = build_watch_alert_message(address, latest)
         send_result = send_telegram_message(
             message,
             chat_id=str(chat_id),
@@ -742,22 +697,104 @@ def check_watches(chat_id):
                 "address": address,
                 "status": "pushed",
                 "txid": latest_txid,
-                "direction": direction,
-                "net_amount": net_amount
+                "direction": latest.get("direction"),
+                "net_amount": format_number(latest.get("net_readable", "0"))
             })
         else:
             alerts.append({
                 "address": address,
                 "status": "push_failed",
                 "txid": latest_txid,
-                "direction": direction,
-                "net_amount": net_amount
+                "direction": latest.get("direction"),
+                "net_amount": format_number(latest.get("net_readable", "0"))
             })
 
     return jsonify({
         "success": True,
         "chat_id": chat_id,
         "alerts": alerts
+    })
+
+
+@app.route("/check-all-users")
+def check_all_users():
+    if not redis_client:
+        return jsonify({"success": False, "error": "REDIS_URL is missing or Redis not connected"}), 500
+
+    chat_ids = list_all_user_chat_ids()
+    results = []
+
+    for chat_id in chat_ids:
+        config = load_user_config(chat_id)
+        watch_addresses = config.get("watch_addresses", []) if config else []
+        user_alerts = []
+
+        for address in watch_addresses:
+            result = get_address_netflow_data(address)
+
+            if not result.get("success"):
+                user_alerts.append({
+                    "address": address,
+                    "status": "error",
+                    "error": result.get("error", "unknown error")
+                })
+                continue
+
+            netflows = result.get("netflows", [])
+            if not netflows:
+                user_alerts.append({
+                    "address": address,
+                    "status": "no_netflow"
+                })
+                continue
+
+            latest = netflows[0]
+            latest_txid = latest.get("txid")
+            last_pushed_txid = get_last_pushed_tx(chat_id, address)
+
+            if latest_txid == last_pushed_txid:
+                user_alerts.append({
+                    "address": address,
+                    "status": "already_processed",
+                    "txid": latest_txid
+                })
+                continue
+
+            message = build_watch_alert_message(address, latest)
+            send_result = send_telegram_message(
+                message,
+                chat_id=str(chat_id),
+                parse_mode="HTML"
+            )
+
+            if send_result.get("success"):
+                save_last_pushed_tx(chat_id, address, latest_txid)
+                user_alerts.append({
+                    "address": address,
+                    "status": "pushed",
+                    "txid": latest_txid,
+                    "direction": latest.get("direction"),
+                    "net_amount": format_number(latest.get("net_readable", "0"))
+                })
+            else:
+                user_alerts.append({
+                    "address": address,
+                    "status": "push_failed",
+                    "txid": latest_txid,
+                    "direction": latest.get("direction"),
+                    "net_amount": format_number(latest.get("net_readable", "0"))
+                })
+
+        results.append({
+            "chat_id": chat_id,
+            "watch_count": len(watch_addresses),
+            "alerts": user_alerts
+        })
+
+    return jsonify({
+        "success": True,
+        "user_count": len(chat_ids),
+        "results": results
     })
 
 
