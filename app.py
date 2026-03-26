@@ -17,7 +17,9 @@ TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 REDIS_URL = os.getenv("REDIS_URL")
 WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET")
 
-# 你的 Render Web Service 公网地址
+ODIN_API_BASE = os.getenv("ODIN_API_BASE", "https://api.odin.fun/v1")
+ODIN_API_TOKEN = os.getenv("ODIN_API_TOKEN", "")
+
 WEB_BASE_URL = "https://runes-watch-bot.onrender.com"
 
 SGT = timezone(timedelta(hours=8))
@@ -35,6 +37,15 @@ def get_headers():
         "Authorization": f"Bearer {UNISAT_API_KEY}",
         "Accept": "application/json"
     }
+
+
+def get_odin_headers():
+    headers = {
+        "Accept": "application/json"
+    }
+    if ODIN_API_TOKEN and ODIN_API_TOKEN != "placeholder":
+        headers["Authorization"] = f"Bearer {ODIN_API_TOKEN}"
+    return headers
 
 
 def format_number(value, decimals=8):
@@ -300,6 +311,15 @@ def get_address_netflow_data(address):
         },
         "netflows": results
     }
+
+
+# =========================
+# Odin 数据（最小测试版）
+# =========================
+def get_odin_user_activity(principal):
+    url = f"{ODIN_API_BASE}/user/{principal}/activity"
+    response = requests.get(url, headers=get_odin_headers(), timeout=20)
+    return response.json(), response.status_code
 
 
 # =========================
@@ -609,7 +629,6 @@ def handle_command(chat_id, text):
             "reply_markup": main_menu_keyboard()
         }
 
-    # 按钮文本
     if text == "设置符文":
         save_user_state(chat_id, {"action": "set_rune"})
         return {
@@ -655,7 +674,6 @@ def handle_command(chat_id, text):
             "reply_markup": main_menu_keyboard()
         }
 
-    # 非命令，先看是否是等待输入
     if not text.startswith("/"):
         pending_result = handle_pending_input(chat_id, text)
         if pending_result:
@@ -667,7 +685,6 @@ def handle_command(chat_id, text):
             "reply_markup": main_menu_keyboard()
         }
 
-    # 命令兼容
     command = text.strip().lower()
 
     if command == "/start":
@@ -737,7 +754,6 @@ def telegram_webhook(secret):
 
 @app.route("/poll-bot")
 def poll_bot():
-    # 保留兼容，便于迁移期手动排查
     if not redis_client:
         return jsonify({"success": False, "error": "REDIS_URL is missing or Redis not connected"}), 500
     if not TELEGRAM_BOT_TOKEN:
@@ -771,9 +787,8 @@ def poll_bot():
                     "send_success": send_result.get("success", False)
                 })
 
-            # webhook 模式下通常不会再用 offset，但保留不影响
             if update_id is not None:
-                save_bot_offset(int(update_id) + 1)
+                save_last_pushed_tx("poll", "offset", str(update_id + 1))
 
         return jsonify({
             "success": True,
@@ -782,6 +797,24 @@ def poll_bot():
         })
     except Exception as e:
         return jsonify({"success": False, "error": str(e)}), 500
+
+
+@app.route("/odin-user-activity/<principal>")
+def odin_user_activity(principal):
+    try:
+        data, status_code = get_odin_user_activity(principal)
+        return jsonify({
+            "success": status_code == 200,
+            "principal": principal,
+            "status_code": status_code,
+            "odin_response": data
+        }), status_code if status_code != 200 else 200
+    except Exception as e:
+        return jsonify({
+            "success": False,
+            "principal": principal,
+            "error": str(e)
+        }), 500
 
 
 @app.route("/get-config/<chat_id>")
