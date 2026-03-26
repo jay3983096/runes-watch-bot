@@ -168,6 +168,23 @@ def get_bot_offset_key():
     return "bot_update_offset"
 
 
+def get_last_tx_key(chat_id, address):
+    return f"last_pushed_tx:{chat_id}:{address}"
+
+
+def get_last_pushed_tx(chat_id, address):
+    if not redis_client:
+        return None
+    return redis_client.get(get_last_tx_key(chat_id, address))
+
+
+def save_last_pushed_tx(chat_id, address, txid):
+    if not redis_client:
+        return False
+    redis_client.set(get_last_tx_key(chat_id, address), txid)
+    return True
+
+
 def load_user_config(chat_id):
     if not redis_client:
         return None
@@ -421,6 +438,102 @@ def get_config(chat_id):
 
     config = load_user_config(chat_id)
     return jsonify({"success": True, "config": config})
+
+
+@app.route("/check-watches/<chat_id>")
+def check_watches(chat_id):
+    if not redis_client:
+        return jsonify({"success": False, "error": "REDIS_URL is missing or Redis not connected"}), 500
+
+    config = load_user_config(chat_id)
+    if config is None:
+        return jsonify({"success": False, "error": "User config not found"}), 404
+
+    watch_addresses = config.get("watch_addresses", [])
+    if not watch_addresses:
+        return jsonify({
+            "success": True,
+            "message": "No watch addresses configured",
+            "alerts": []
+        })
+
+    alerts = []
+
+    for address in watch_addresses:
+        result = get_address_netflow_data(address)
+
+        if not result.get("success"):
+            alerts.append({
+                "address": address,
+                "status": "error",
+                "error": result.get("error", "unknown error")
+            })
+            continue
+
+        netflows = result.get("netflows", [])
+        if not netflows:
+            alerts.append({
+                "address": address,
+                "status": "no_netflow"
+            })
+            continue
+
+        latest = netflows[0]
+        latest_txid = latest.get("txid")
+        last_pushed_txid = get_last_pushed_tx(chat_id, address)
+
+        if latest_txid == last_pushed_txid:
+            alerts.append({
+                "address": address,
+                "status": "already_processed",
+                "txid": latest_txid
+            })
+            continue
+
+        direction = latest.get("direction")
+        net_amount = latest.get("net_readable")
+
+        if direction == "inflow":
+            emoji = "🟢"
+        elif direction == "outflow":
+            emoji = "🔴"
+        else:
+            emoji = "⚪"
+
+        message = (
+            f"{emoji} Address Activity Alert\n\n"
+            f"Address: {address}\n"
+            f"Rune: {TARGET_RUNE_NAME}\n"
+            f"Direction: {direction}\n"
+            f"Net Amount: {net_amount}\n"
+            f"Txid: {latest_txid}"
+        )
+
+        send_result = send_telegram_message(message, chat_id=str(chat_id))
+
+        if send_result.get("success"):
+            save_last_pushed_tx(chat_id, address, latest_txid)
+            alerts.append({
+                "address": address,
+                "status": "pushed",
+                "txid": latest_txid,
+                "direction": direction,
+                "net_amount": net_amount
+            })
+        else:
+            alerts.append({
+                "address": address,
+                "status": "push_failed",
+                "txid": latest_txid,
+                "direction": direction,
+                "net_amount": net_amount
+            })
+
+    return jsonify({
+        "success": True,
+        "chat_id": chat_id,
+        "alerts": alerts
+    })
 
 
 if __name__ == "__main__":
