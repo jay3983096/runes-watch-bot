@@ -23,6 +23,9 @@ if REDIS_URL:
     redis_client = redis.from_url(REDIS_URL, decode_responses=True)
 
 
+# =========================
+# 基础工具
+# =========================
 def get_headers():
     return {
         "Authorization": f"Bearer {UNISAT_API_KEY}",
@@ -63,6 +66,151 @@ def tx_url(txid):
     return f"https://mempool.space/tx/{txid}"
 
 
+# =========================
+# Telegram 主菜单按钮
+# =========================
+def main_menu_keyboard():
+    return {
+        "keyboard": [
+            ["📌 设置符文", "➕ 添加监控地址"],
+            ["📋 我的监控列表", "⚙️ 当前配置"]
+        ],
+        "resize_keyboard": True
+    }
+
+
+# =========================
+# Redis Key
+# =========================
+def get_user_key(chat_id):
+    return f"user_config:{chat_id}"
+
+
+def get_bot_offset_key():
+    return "bot_update_offset"
+
+
+def get_last_tx_key(chat_id, address):
+    return f"last_pushed_tx:{chat_id}:{address}"
+
+
+def get_user_state_key(chat_id):
+    return f"user_state:{chat_id}"
+
+
+# =========================
+# Redis 用户配置
+# =========================
+def load_user_config(chat_id):
+    if not redis_client:
+        return None
+
+    raw = redis_client.get(get_user_key(chat_id))
+    if not raw:
+        return {
+            "chat_id": str(chat_id),
+            "rune_id": None,
+            "rune_name": None,
+            "watch_addresses": []
+        }
+
+    return json.loads(raw)
+
+
+def save_user_config(chat_id, config):
+    if not redis_client:
+        return False
+
+    redis_client.set(get_user_key(chat_id), json.dumps(config))
+    return True
+
+
+def list_all_user_chat_ids():
+    if not redis_client:
+        return []
+
+    keys = redis_client.keys("user_config:*")
+    chat_ids = []
+    for key in keys:
+        if key.startswith("user_config:"):
+            chat_ids.append(key.split("user_config:", 1)[1])
+    return chat_ids
+
+
+# =========================
+# Redis 状态（用于按钮后的下一步输入）
+# =========================
+def load_user_state(chat_id):
+    if not redis_client:
+        return None
+
+    raw = redis_client.get(get_user_state_key(chat_id))
+    if not raw:
+        return {}
+
+    return json.loads(raw)
+
+
+def save_user_state(chat_id, state):
+    if not redis_client:
+        return False
+
+    redis_client.set(get_user_state_key(chat_id), json.dumps(state))
+    return True
+
+
+def clear_user_state(chat_id):
+    if not redis_client:
+        return False
+
+    redis_client.delete(get_user_state_key(chat_id))
+    return True
+
+
+# =========================
+# Redis 监控去重
+# =========================
+def get_last_pushed_tx(chat_id, address):
+    if not redis_client:
+        return None
+    return redis_client.get(get_last_tx_key(chat_id, address))
+
+
+def save_last_pushed_tx(chat_id, address, txid):
+    if not redis_client:
+        return False
+    redis_client.set(get_last_tx_key(chat_id, address), txid)
+    return True
+
+
+# =========================
+# Bot offset
+# =========================
+def get_bot_offset():
+    if not redis_client:
+        return None
+
+    offset = redis_client.get(get_bot_offset_key())
+    if not offset:
+        return None
+
+    try:
+        return int(offset)
+    except Exception:
+        return None
+
+
+def save_bot_offset(offset):
+    if not redis_client:
+        return False
+
+    redis_client.set(get_bot_offset_key(), str(offset))
+    return True
+
+
+# =========================
+# UniSat 数据
+# =========================
 def fetch_rune_events():
     url = "https://open-api.unisat.io/v1/indexer/runes/event"
     params = {"rune": TARGET_RUNE_NAME}
@@ -176,7 +324,10 @@ def get_address_netflow_data(address):
     }
 
 
-def send_telegram_message(text, chat_id=None, parse_mode=None):
+# =========================
+# Telegram 发送
+# =========================
+def send_telegram_message(text, chat_id=None, parse_mode=None, reply_markup=None):
     if not TELEGRAM_BOT_TOKEN:
         return {"success": False, "error": "TELEGRAM_BOT_TOKEN 缺失"}
 
@@ -194,6 +345,9 @@ def send_telegram_message(text, chat_id=None, parse_mode=None):
     if parse_mode:
         payload["parse_mode"] = parse_mode
 
+    if reply_markup:
+        payload["reply_markup"] = reply_markup
+
     response = requests.post(url, json=payload, timeout=20)
     data = response.json()
 
@@ -201,89 +355,6 @@ def send_telegram_message(text, chat_id=None, parse_mode=None):
         "success": data.get("ok", False),
         "telegram_response": data
     }
-
-
-def get_user_key(chat_id):
-    return f"user_config:{chat_id}"
-
-
-def get_bot_offset_key():
-    return "bot_update_offset"
-
-
-def get_last_tx_key(chat_id, address):
-    return f"last_pushed_tx:{chat_id}:{address}"
-
-
-def get_last_pushed_tx(chat_id, address):
-    if not redis_client:
-        return None
-    return redis_client.get(get_last_tx_key(chat_id, address))
-
-
-def save_last_pushed_tx(chat_id, address, txid):
-    if not redis_client:
-        return False
-    redis_client.set(get_last_tx_key(chat_id, address), txid)
-    return True
-
-
-def load_user_config(chat_id):
-    if not redis_client:
-        return None
-
-    raw = redis_client.get(get_user_key(chat_id))
-    if not raw:
-        return {
-            "chat_id": str(chat_id),
-            "rune_id": None,
-            "rune_name": None,
-            "watch_addresses": []
-        }
-
-    return json.loads(raw)
-
-
-def save_user_config(chat_id, config):
-    if not redis_client:
-        return False
-
-    redis_client.set(get_user_key(chat_id), json.dumps(config))
-    return True
-
-
-def list_all_user_chat_ids():
-    if not redis_client:
-        return []
-
-    keys = redis_client.keys("user_config:*")
-    chat_ids = []
-    for key in keys:
-        if key.startswith("user_config:"):
-            chat_ids.append(key.split("user_config:", 1)[1])
-    return chat_ids
-
-
-def get_bot_offset():
-    if not redis_client:
-        return None
-
-    offset = redis_client.get(get_bot_offset_key())
-    if not offset:
-        return None
-
-    try:
-        return int(offset)
-    except Exception:
-        return None
-
-
-def save_bot_offset(offset):
-    if not redis_client:
-        return False
-
-    redis_client.set(get_bot_offset_key(), str(offset))
-    return True
 
 
 def get_updates_from_telegram():
@@ -301,6 +372,9 @@ def get_updates_from_telegram():
     return response.json()
 
 
+# =========================
+# 文案格式化
+# =========================
 def format_user_config(config):
     watch_list = config.get("watch_addresses", [])
 
@@ -398,22 +472,148 @@ def build_watch_alert_message(address, latest):
     )
 
 
+# =========================
+# 输入状态处理（按钮后让用户继续输入）
+# =========================
+def handle_pending_input(chat_id, text):
+    state = load_user_state(chat_id)
+    action = state.get("action")
+
+    config = load_user_config(chat_id)
+    if config is None:
+        return {
+            "text": "❌ Redis 未连接。",
+            "parse_mode": None,
+            "reply_markup": main_menu_keyboard()
+        }
+
+    if action == "set_rune":
+        parts = text.strip().split()
+        if len(parts) < 2:
+            return {
+                "text": "❌ 请输入正确格式：\n符文ID 空格 符文名称\n\n例如：\n900830:2441 BTHACD•ID•FQEE•ODIN",
+                "parse_mode": None,
+                "reply_markup": main_menu_keyboard()
+            }
+
+        rune_id = parts[0]
+        rune_name = " ".join(parts[1:])
+
+        config["rune_id"] = rune_id
+        config["rune_name"] = rune_name
+        save_user_config(chat_id, config)
+        clear_user_state(chat_id)
+
+        return {
+            "text": (
+                "✅ 已设置监控符文\n\n"
+                f"符文 ID：{rune_id}\n"
+                f"符文名称：{rune_name}"
+            ),
+            "parse_mode": None,
+            "reply_markup": main_menu_keyboard()
+        }
+
+    if action == "add_watch":
+        address = text.strip()
+
+        if address not in config["watch_addresses"]:
+            config["watch_addresses"].append(address)
+            save_user_config(chat_id, config)
+
+        clear_user_state(chat_id)
+
+        return {
+            "text": (
+                "✅ 已添加监控地址\n\n"
+                f"地址：{address}"
+            ),
+            "parse_mode": None,
+            "reply_markup": main_menu_keyboard()
+        }
+
+    return None
+
+
+# =========================
+# 命令 / 按钮处理
+# =========================
 def handle_command(chat_id, text):
     config = load_user_config(chat_id)
     if config is None:
-        return {"text": "❌ Redis 未连接。", "parse_mode": None}
+        return {
+            "text": "❌ Redis 未连接。",
+            "parse_mode": None,
+            "reply_markup": main_menu_keyboard()
+        }
+
+    # 先处理按钮文本
+    if text == "📌 设置符文":
+        save_user_state(chat_id, {"action": "set_rune"})
+        return {
+            "text": (
+                "请发送要监控的符文，格式如下：\n\n"
+                "符文ID 空格 符文名称\n\n"
+                "例如：\n"
+                "900830:2441 BTHACD•ID•FQEE•ODIN"
+            ),
+            "parse_mode": None,
+            "reply_markup": main_menu_keyboard()
+        }
+
+    if text == "➕ 添加监控地址":
+        save_user_state(chat_id, {"action": "add_watch"})
+        return {
+            "text": "请直接发送你要添加的监控地址。",
+            "parse_mode": None,
+            "reply_markup": main_menu_keyboard()
+        }
+
+    if text == "📋 我的监控列表":
+        clear_user_state(chat_id)
+        return {
+            "text": format_watch_list(config),
+            "parse_mode": None,
+            "reply_markup": main_menu_keyboard()
+        }
+
+    if text == "⚙️ 当前配置":
+        clear_user_state(chat_id)
+        return {
+            "text": format_user_config(config),
+            "parse_mode": None,
+            "reply_markup": main_menu_keyboard()
+        }
+
+    # 如果不是命令，先看是否处于等待输入状态
+    if not text.startswith("/"):
+        pending_result = handle_pending_input(chat_id, text)
+        if pending_result:
+            return pending_result
+
+        return {
+            "text": "❌ 无法识别你的输入。你可以点击下方按钮继续操作，或发送 /start 查看帮助。",
+            "parse_mode": None,
+            "reply_markup": main_menu_keyboard()
+        }
 
     parts = text.strip().split()
     if not parts:
-        return {"text": "❌ 空命令。", "parse_mode": None}
+        return {
+            "text": "❌ 空命令。",
+            "parse_mode": None,
+            "reply_markup": main_menu_keyboard()
+        }
 
     command = parts[0].lower()
 
     if command == "/start":
+        clear_user_state(chat_id)
         return {
             "text": (
                 "✅ Runes 监控机器人已就绪。\n\n"
-                "可用命令：\n"
+                "你可以直接点击下方按钮操作，\n"
+                "也可以使用命令：\n"
                 "/start\n"
                 "/setrune <符文ID> <符文名称>\n"
                 "/addwatch <地址>\n"
@@ -424,18 +624,24 @@ def handle_command(chat_id, text):
                 "/summary <地址>\n"
                 "/history <地址>"
             ),
-            "parse_mode": None
+            "parse_mode": None,
+            "reply_markup": main_menu_keyboard()
         }
 
     if command == "/setrune":
         if len(parts) < 3:
-            return {"text": "❌ 用法：/setrune <符文ID> <符文名称>", "parse_mode": None}
+            return {
+                "text": "❌ 用法：/setrune <符文ID> <符文名称>",
+                "parse_mode": None,
+                "reply_markup": main_menu_keyboard()
+            }
 
         rune_id = parts[1]
         rune_name = " ".join(parts[2:])
         config["rune_id"] = rune_id
         config["rune_name"] = rune_name
         save_user_config(chat_id, config)
+        clear_user_state(chat_id)
 
         return {
             "text": (
@@ -443,29 +649,40 @@ def handle_command(chat_id, text):
                 f"符文 ID：{rune_id}\n"
                 f"符文名称：{rune_name}"
             ),
-            "parse_mode": None
+            "parse_mode": None,
+            "reply_markup": main_menu_keyboard()
         }
 
     if command == "/addwatch":
         if len(parts) < 2:
-            return {"text": "❌ 用法：/addwatch <地址>", "parse_mode": None}
+            return {
+                "text": "❌ 用法：/addwatch <地址>",
+                "parse_mode": None,
+                "reply_markup": main_menu_keyboard()
+            }
 
         address = parts[1]
         if address not in config["watch_addresses"]:
             config["watch_addresses"].append(address)
             save_user_config(chat_id, config)
+        clear_user_state(chat_id)
 
         return {
             "text": (
                 "✅ 已添加监控地址\n\n"
                 f"地址：{address}"
             ),
-            "parse_mode": None
+            "parse_mode": None,
+            "reply_markup": main_menu_keyboard()
         }
 
     if command == "/removewatch":
         if len(parts) < 2:
-            return {"text": "❌ 用法：/removewatch <地址>", "parse_mode": None}
+            return {
+                "text": "❌ 用法：/removewatch <地址>",
+                "parse_mode": None,
+                "reply_markup": main_menu_keyboard()
+            }
 
         address = parts[1]
         if address in config["watch_addresses"]:
@@ -476,7 +693,8 @@ def handle_command(chat_id, text):
                     "✅ 已移除监控地址\n\n"
                     f"地址：{address}"
                 ),
-                "parse_mode": None
+                "parse_mode": None,
+                "reply_markup": main_menu_keyboard()
             }
 
         return {
@@ -484,18 +702,31 @@ def handle_command(chat_id, text):
                 "⚠️ 该地址不在监控列表中\n\n"
                 f"地址：{address}"
             ),
-            "parse_mode": None
+            "parse_mode": None,
+            "reply_markup": main_menu_keyboard()
         }
 
     if command == "/listwatch":
-        return {"text": format_watch_list(config), "parse_mode": None}
+        return {
+            "text": format_watch_list(config),
+            "parse_mode": None,
+            "reply_markup": main_menu_keyboard()
+        }
 
     if command == "/myconfig":
-        return {"text": format_user_config(config), "parse_mode": None}
+        return {
+            "text": format_user_config(config),
+            "parse_mode": None,
+            "reply_markup": main_menu_keyboard()
+        }
 
     if command == "/balance":
         if len(parts) < 2:
-            return {"text": "❌ 用法：/balance <地址>", "parse_mode": None}
+            return {
+                "text": "❌ 用法：/balance <地址>",
+                "parse_mode": None,
+                "reply_markup": main_menu_keyboard()
+            }
 
         address = parts[1]
         try:
@@ -504,7 +735,8 @@ def handle_command(chat_id, text):
             if data.get("code") != 0:
                 return {
                     "text": f"❌ 查询余额失败：{json.dumps(data, ensure_ascii=False)}",
-                    "parse_mode": None
+                    "parse_mode": None,
+                    "reply_markup": main_menu_keyboard()
                 }
 
             rune_data = data.get("data", {})
@@ -519,20 +751,33 @@ def handle_command(chat_id, text):
                     f"符文：{TARGET_RUNE_NAME}\n"
                     f"余额：{format_number(readable_amount)}"
                 ),
-                "parse_mode": None
+                "parse_mode": None,
+                "reply_markup": main_menu_keyboard()
             }
         except Exception as e:
-            return {"text": f"❌ 查询余额出错：{str(e)}", "parse_mode": None}
+            return {
+                "text": f"❌ 查询余额出错：{str(e)}",
+                "parse_mode": None,
+                "reply_markup": main_menu_keyboard()
+            }
 
     if command == "/summary":
         if len(parts) < 2:
-            return {"text": "❌ 用法：/summary <地址>", "parse_mode": None}
+            return {
+                "text": "❌ 用法：/summary <地址>",
+                "parse_mode": None,
+                "reply_markup": main_menu_keyboard()
+            }
 
         address = parts[1]
         try:
             result = get_address_netflow_data(address)
             if not result.get("success"):
-                return {"text": "❌ 查询汇总失败。", "parse_mode": None}
+                return {
+                    "text": "❌ 查询汇总失败。",
+                    "parse_mode": None,
+                    "reply_markup": main_menu_keyboard()
+                }
 
             summary = result.get("summary", {})
             return {
@@ -544,31 +789,56 @@ def handle_command(chat_id, text):
                     f"总流出：{format_number(summary.get('total_outflow', '0'))}\n"
                     f"净持仓：{format_number(summary.get('net_position', '0'))}"
                 ),
-                "parse_mode": None
+                "parse_mode": None,
+                "reply_markup": main_menu_keyboard()
             }
         except Exception as e:
-            return {"text": f"❌ 查询汇总出错：{str(e)}", "parse_mode": None}
+            return {
+                "text": f"❌ 查询汇总出错：{str(e)}",
+                "parse_mode": None,
+                "reply_markup": main_menu_keyboard()
+            }
 
     if command == "/history":
         if len(parts) < 2:
-            return {"text": "❌ 用法：/history <地址>", "parse_mode": None}
+            return {
+                "text": "❌ 用法：/history <地址>",
+                "parse_mode": None,
+                "reply_markup": main_menu_keyboard()
+            }
 
         address = parts[1]
         try:
             result = get_address_netflow_data(address)
             if not result.get("success"):
-                return {"text": "❌ 查询历史失败。", "parse_mode": None}
+                return {
+                    "text": "❌ 查询历史失败。",
+                    "parse_mode": None,
+                    "reply_markup": main_menu_keyboard()
+                }
 
             return {
                 "text": format_history(address, result, limit=5),
-                "parse_mode": "HTML"
+                "parse_mode": "HTML",
+                "reply_markup": main_menu_keyboard()
             }
         except Exception as e:
-            return {"text": f"❌ 查询历史出错：{str(e)}", "parse_mode": None}
+            return {
+                "text": f"❌ 查询历史出错：{str(e)}",
+                "parse_mode": None,
+                "reply_markup": main_menu_keyboard()
+            }
 
-    return {"text": "❌ 未知命令，请先使用 /start 查看帮助。", "parse_mode": None}
+    return {
+        "text": "❌ 未知命令，请先使用 /start 查看帮助。",
+        "parse_mode": None,
+        "reply_markup": main_menu_keyboard()
+    }
 
 
+# =========================
+# Web 路由
+# =========================
 @app.route("/")
 def home():
     return "Runes Watch Bot is running!"
@@ -578,6 +848,7 @@ def home():
 def poll_bot():
     if not redis_client:
         return jsonify({"success": False, "error": "REDIS_URL is missing or Redis not connected"}), 500
+
     if not TELEGRAM_BOT_TOKEN:
         return jsonify({"success": False, "error": "TELEGRAM_BOT_TOKEN is missing"}), 500
 
@@ -585,7 +856,10 @@ def poll_bot():
         data = get_updates_from_telegram()
 
         if not data.get("ok"):
-            return jsonify({"success": False, "telegram_response": data}), 400
+            return jsonify({
+                "success": False,
+                "telegram_response": data
+            }), 400
 
         results = data.get("result", [])
         processed = []
@@ -602,7 +876,8 @@ def poll_bot():
                 send_result = send_telegram_message(
                     reply["text"],
                     chat_id=str(chat_id),
-                    parse_mode=reply.get("parse_mode")
+                    parse_mode=reply.get("parse_mode"),
+                    reply_markup=reply.get("reply_markup")
                 )
 
                 processed.append({
