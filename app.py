@@ -39,16 +39,17 @@ def fetch_rune_events():
     return response.json()
 
 
-def send_telegram_message(text):
+def send_telegram_message(text, chat_id=None):
     if not TELEGRAM_BOT_TOKEN:
         return {"success": False, "error": "TELEGRAM_BOT_TOKEN is missing"}
 
-    if not TELEGRAM_CHAT_ID:
-        return {"success": False, "error": "TELEGRAM_CHAT_ID is missing"}
+    final_chat_id = chat_id or TELEGRAM_CHAT_ID
+    if not final_chat_id:
+        return {"success": False, "error": "chat_id is missing"}
 
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     payload = {
-        "chat_id": TELEGRAM_CHAT_ID,
+        "chat_id": final_chat_id,
         "text": text
     }
 
@@ -63,6 +64,10 @@ def send_telegram_message(text):
 
 def get_user_key(chat_id):
     return f"user_config:{chat_id}"
+
+
+def get_bot_offset_key():
+    return "bot_update_offset"
 
 
 def load_user_config(chat_id):
@@ -87,6 +92,120 @@ def save_user_config(chat_id, config):
 
     redis_client.set(get_user_key(chat_id), json.dumps(config))
     return True
+
+
+def get_bot_offset():
+    if not redis_client:
+        return None
+
+    offset = redis_client.get(get_bot_offset_key())
+    if not offset:
+        return None
+
+    try:
+        return int(offset)
+    except Exception:
+        return None
+
+
+def save_bot_offset(offset):
+    if not redis_client:
+        return False
+
+    redis_client.set(get_bot_offset_key(), str(offset))
+    return True
+
+
+def get_updates_from_telegram():
+    if not TELEGRAM_BOT_TOKEN:
+        return {"ok": False, "error": "TELEGRAM_BOT_TOKEN is missing"}
+
+    offset = get_bot_offset()
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getUpdates"
+
+    params = {}
+    if offset is not None:
+        params["offset"] = offset
+
+    response = requests.get(url, params=params, timeout=20)
+    return response.json()
+
+
+def format_user_config(config):
+    watch_list = config.get("watch_addresses", [])
+
+    if watch_list:
+        watch_text = "\n".join([f"- {addr}" for addr in watch_list])
+    else:
+        watch_text = "(empty)"
+
+    return (
+        "📋 Your current config\n\n"
+        f"Chat ID: {config.get('chat_id')}\n"
+        f"Rune ID: {config.get('rune_id')}\n"
+        f"Rune Name: {config.get('rune_name')}\n"
+        f"Watch Addresses:\n{watch_text}"
+    )
+
+
+def handle_command(chat_id, text):
+    config = load_user_config(chat_id)
+    if config is None:
+        return "❌ Redis is not connected."
+
+    parts = text.strip().split()
+
+    if not parts:
+        return "❌ Empty command."
+
+    command = parts[0].lower()
+
+    if command == "/start":
+        return (
+            "✅ Runes Watch Bot is ready.\n\n"
+            "Available commands:\n"
+            "/start\n"
+            "/setrune <rune_id> <rune_name>\n"
+            "/addwatch <address>\n"
+            "/myconfig"
+        )
+
+    if command == "/setrune":
+        if len(parts) < 3:
+            return "❌ Usage: /setrune <rune_id> <rune_name>"
+
+        rune_id = parts[1]
+        rune_name = " ".join(parts[2:])
+
+        config["rune_id"] = rune_id
+        config["rune_name"] = rune_name
+        save_user_config(chat_id, config)
+
+        return (
+            "✅ Rune has been set\n\n"
+            f"Rune ID: {rune_id}\n"
+            f"Rune Name: {rune_name}"
+        )
+
+    if command == "/addwatch":
+        if len(parts) < 2:
+            return "❌ Usage: /addwatch <address>"
+
+        address = parts[1]
+
+        if address not in config["watch_addresses"]:
+            config["watch_addresses"].append(address)
+            save_user_config(chat_id, config)
+
+        return (
+            "✅ Watch address added\n\n"
+            f"Address: {address}"
+        )
+
+    if command == "/myconfig":
+        return format_user_config(config)
+
+    return "❌ Unknown command. Try /start"
 
 
 @app.route("/")
@@ -168,8 +287,8 @@ def address_events(address):
             }), 400
 
         detail_list = data.get("data", {}).get("detail", [])
-
         matched_events = []
+
         for item in detail_list:
             if item.get("address") == address:
                 amount_raw = item.get("amount", "0")
@@ -310,7 +429,6 @@ def get_updates():
     try:
         response = requests.get(url, timeout=20)
         data = response.json()
-
         return jsonify({
             "success": True,
             "telegram_response": data
@@ -388,6 +506,57 @@ def get_config(chat_id):
         "success": True,
         "config": config
     })
+
+
+@app.route("/poll-bot")
+def poll_bot():
+    if not redis_client:
+        return jsonify({"success": False, "error": "REDIS_URL is missing or Redis not connected"}), 500
+
+    if not TELEGRAM_BOT_TOKEN:
+        return jsonify({"success": False, "error": "TELEGRAM_BOT_TOKEN is missing"}), 500
+
+    try:
+        data = get_updates_from_telegram()
+
+        if not data.get("ok"):
+            return jsonify({
+                "success": False,
+                "telegram_response": data
+            }), 400
+
+        results = data.get("result", [])
+        processed = []
+
+        for item in results:
+            update_id = item.get("update_id")
+            message = item.get("message", {})
+            text = message.get("text", "")
+            chat = message.get("chat", {})
+            chat_id = chat.get("id")
+
+            if text and chat_id:
+                reply_text = handle_command(str(chat_id), text)
+                send_result = send_telegram_message(reply_text, chat_id=str(chat_id))
+
+                processed.append({
+                    "update_id": update_id,
+                    "chat_id": chat_id,
+                    "text": text,
+                    "reply_text": reply_text,
+                    "send_success": send_result.get("success", False)
+                })
+
+            if update_id is not None:
+                save_bot_offset(int(update_id) + 1)
+
+        return jsonify({
+            "success": True,
+            "processed_count": len(processed),
+            "processed": processed
+        })
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 500
 
 
 if __name__ == "__main__":
